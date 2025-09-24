@@ -11,6 +11,7 @@
 *.sln.docstates
 *.env
 
+.adhoc_ssl
 .venv
 
 /old/

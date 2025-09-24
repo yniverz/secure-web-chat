@@ -82,8 +82,7 @@ const LS_KEYS = {
     id_hash: 'sc.id_hash',              // server-visible id
     enc_private: 'sc.enc_private',      // AES-GCM by user_key
     enc_public: 'sc.enc_public',        // AES-GCM by user_key (redundant but convenient)
-    enc_contacts: 'sc.enc_contacts',    // AES-GCM by user_key
-    enc_push_card: 'sc.enc_push_card'   // AES-GCM by user_key: { subscription, (optional) vapid_private?, vapid_public?, subject_email? }
+    enc_contacts: 'sc.enc_contacts'     // AES-GCM by user_key
 };
 
 async function loadEncrypted(key, slot, fallback) {
@@ -110,93 +109,7 @@ let messagesByContact = new Map();
 let activeContact = null;
 let pollAbort = null;
 
-/* ========================= NOTIFICATION / PUSH HELPERS ========================= */
-const VAPID_DEFAULT_SUBJECT = 'mailto:you@example.com';
-
-function ab2b64u(buf) { return b64u.e(buf); }
-async function urlBase64ToUint8Array(base64String) {
-    const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
-    const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
-    const rawData = atob(base64);
-    const outputArray = new Uint8Array(rawData.length);
-    for (let i = 0; i < rawData.length; ++i) outputArray[i] = rawData.charCodeAt(i);
-    return outputArray;
-}
-
-async function genVapidKeysClient() {
-    // Generate ECDSA P-256 keypair; export private (pkcs8) and public (raw uncompressed)
-    const kp = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
-    const pkcs8 = await crypto.subtle.exportKey('pkcs8', kp.privateKey);
-    const rawPub = await crypto.subtle.exportKey('raw', kp.publicKey); // 65 bytes
-    return {
-        subject_email: VAPID_DEFAULT_SUBJECT,
-        public_key: ab2b64u(new Uint8Array(rawPub)),
-        private_key: ab2b64u(new Uint8Array(pkcs8))
-    };
-}
-
-async function ensureServiceWorkerRegistered() {
-    if (!('serviceWorker' in navigator)) throw new Error('SW not supported');
-    let reg = await navigator.serviceWorker.getRegistration();
-    if (!reg) reg = await navigator.serviceWorker.register('./sw.js');
-    return reg;
-}
-
-async function setupPushNotifications() {
-    if (!('Notification' in window)) { showToast('Notifications not supported'); return null; }
-    const perm = await Notification.requestPermission();
-    if (perm !== 'granted') { showToast('Notifications denied'); return null; }
-    const reg = await ensureServiceWorkerRegistered();
-
-    // Build or load our local push card (encrypted at rest)
-    let card = await loadEncrypted(me.userKey, LS_KEYS.enc_push_card, null);
-    if (!card || !card.config?.public_key || !card.config?.private_key) {
-        try {
-            const cfg = await genVapidKeysClient();
-            card = { device_name: (navigator.userAgentData?.platform || navigator.platform || 'Web'), config: cfg, subscription: null };
-        } catch (err) {
-            console.error('VAPID generation failed', err);
-            showToast('Push not available');
-            return null;
-        }
-    }
-
-    const appServerKey = await urlBase64ToUint8Array(card.config.public_key);
-    let sub = await reg.pushManager.getSubscription();
-    if (!sub) {
-        sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: appServerKey });
-    }
-    const subJson = sub.toJSON();
-    card.subscription = { endpoint: subJson.endpoint, keys: { p256dh: subJson.keys?.p256dh, auth: subJson.keys?.auth } };
-    card.config.subject_email = card.config.subject_email || VAPID_DEFAULT_SUBJECT;
-    await saveEncrypted(me.userKey, LS_KEYS.enc_push_card, card);
-    showToast('Notifications enabled');
-    updateNotifButtonVisibility();
-    return card;
-}
-
-function updateNotifButtonVisibility() {
-    try {
-        const hasEnc = !!localStorage.getItem(LS_KEYS.enc_push_card);
-        const btn = document.getElementById('notif-setup');
-        if (!btn) return;
-        if (hasEnc) btn.style.display = 'none'; else btn.style.display = '';
-    } catch {}
-}
-
-async function getMyPushCardSendable() {
-    const card = await loadEncrypted(me.userKey, LS_KEYS.enc_push_card, null);
-    if (!card || !card.subscription || !card.config?.private_key || !card.config?.public_key) return null;
-    return {
-        device_name: card.device_name,
-        subscription: card.subscription,
-        vapid: {
-            subject_email: card.config.subject_email || VAPID_DEFAULT_SUBJECT,
-            public_key: card.config.public_key,
-            private_key: card.config.private_key
-        }
-    };
-}
+/* (notifications removed) */
 
 /* ========================= VIEW WIRING (same UI as before + extras) ========================= */
 const V = {
@@ -334,7 +247,7 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
 
     await startPolling();
     renderContacts(contacts);
-    updateNotifButtonVisibility();
+    // notifications removed
     show('contacts');
 });
 
@@ -348,25 +261,7 @@ document.getElementById('logout-btn').addEventListener('click', () => {
     show('login');
 });
 
-// 2.1) Notification setup (request permission + subscribe + store card)
-document.getElementById('notif-setup')?.addEventListener('click', async () => {
-    const card = await setupPushNotifications();
-    if (card && me?.id_hash) {
-        // Register our push card with the server (so it can notify on incoming messages)
-        try {
-            const sendableCard = await getMyPushCardSendable();
-            if (sendableCard) {
-                await api('/push/register', { method: 'POST', body: JSON.stringify({ id_hash: me.id_hash, card: sendableCard }) });
-            }
-        } catch (e) { /* ignore */ }
-        // Share our push-card with all contacts via control message
-        const sendableCard = await getMyPushCardSendable();
-        const payload = { type: 'control', content: { kind: 'push-card', id_hash: me.id_hash, card: sendableCard, ts: Date.now() } };
-        for (const c of contacts) {
-            api('/messages/push', { method: 'POST', body: JSON.stringify({ to_id_hash: c.id_hash, payload }) }).catch(() => {});
-        }
-    }
-});
+// notifications removed
 
 // 3) Search + Add via 8-char code
 V.search.addEventListener('input', async () => {
@@ -378,27 +273,18 @@ V.search.addEventListener('input', async () => {
             // decrypt blob with k4
             const key = await crypto.subtle.importKey('raw', enc.encode(k4.padEnd(32, 'x')).slice(0, 32), 'AES-GCM', false, ['decrypt']);
             const blob = await aesDecrypt(key, res.blob);
-            // blob: { id_hash, pubJwk, notifUrl?, notifToken?, pushCard? }
+            // blob: { id_hash, pubJwk, name }
             // Add/merge contact (you choose a name locally)
             const existing = contacts.find(c => c.id_hash === blob.id_hash);
             if (!existing) {
-                const newC = { name: blob.name || blob.id_hash.slice(0, 6), id_hash: blob.id_hash, pubJwk: blob.pubJwk, notifUrl: blob.notifUrl, notifToken: blob.notifToken, pushCard: blob.pushCard };
+                const newC = { name: blob.name || blob.id_hash.slice(0, 6), id_hash: blob.id_hash, pubJwk: blob.pubJwk };
                 contacts.push(newC);
                 await saveEncrypted(me.userKey, LS_KEYS.enc_contacts, contacts);
                 renderContacts(contacts);
             }
             showToast('Contact imported!');
             V.search.value = '';
-
-            // Send back our card as a "message-like" object (handshake)
-            const myPushCard = await getMyPushCardSendable();
-            if (myPushCard) {
-                // Also register with server
-                api('/push/register', { method: 'POST', body: JSON.stringify({ id_hash: me.id_hash, card: myPushCard }) }).catch(() => {});
-            }
-            const backCard = { kind: 'contact-card', id_hash: me.id_hash, pubJwk: me.pubJwk, notifUrl: null, notifToken: null, pushCard: myPushCard, ts: Date.now() };
-            const payload = backCard; // unencrypted envelope—BUT we’ll wrap in standard message payload for consistency
-            await api('/messages/push', { method: 'POST', body: JSON.stringify({ to_id_hash: blob.id_hash, payload: { type: 'control', content: payload } }) });
+            // notifications removed: no back card/control message
         } catch (e) { showToast('Invalid 8-char code'); }
     } else {
         // just filter UI
@@ -413,12 +299,7 @@ document.getElementById('share-me').addEventListener('click', async () => {
     const k4 = randStr(4); // user secret
     const s4 = randStr(4); // ask server to store under this (will retry on conflict server-side)
     const aesKey = await crypto.subtle.importKey('raw', enc.encode(k4.padEnd(32, 'x')).slice(0, 32), 'AES-GCM', false, ['encrypt']);
-    const pushCard = await getMyPushCardSendable();
-    if (pushCard) {
-        // register with server to enable notifications
-        api('/push/register', { method: 'POST', body: JSON.stringify({ id_hash: me.id_hash, card: pushCard }) }).catch(() => {});
-    }
-    const blob = { id_hash: me.id_hash, pubJwk: me.pubJwk, notifUrl: null, notifToken: null, name: me.username, pushCard };
+    const blob = { id_hash: me.id_hash, pubJwk: me.pubJwk, name: me.username };
     const encBlob = await aesEncrypt(aesKey, blob);
     const res = await api('/share/create', { method: 'POST', body: JSON.stringify({ prefer_code4: s4, blob: encBlob, ttl_seconds: 3600 }) });
     const code = res.code4 + k4;
@@ -463,11 +344,7 @@ document.getElementById('composer-form').addEventListener('submit', async (e) =>
     try {
         const pack = await hybridEncryptRSAOaep(c.pubJwk, { text, ts: msg.ts, from: me.id_hash });
         await api('/messages/push', { method: 'POST', body: JSON.stringify({ to_id_hash: c.id_hash, payload: { type: 'msg', content: pack } }) });
-        // External notifier hook (if you share an alternate HTTP endpoint)
-        if (c.notifUrl && c.notifToken) {
-            // Legacy/alt HTTP notifier
-            fetch(c.notifUrl, { method: 'POST', headers: { 'Authorization': `Bearer ${c.notifToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: me.id_hash, preview: text.slice(0, 64) }) }).catch(() => { });
-        }
+        // notifications removed: no external notifier hook
     } catch (err) {
         showToast('Send failed');
     }
@@ -517,21 +394,6 @@ async function startPolling() {
                             console.error('Decrypt failed for incoming message', e, item);
                             showToast('Received a message I could not decrypt.');
                         }
-                    } else if (item.payload?.type === 'control' && item.payload.content?.kind === 'contact-card') {
-                        // Add/merge back card info
-                        const cc = item.payload.content;
-                        let c = contacts.find(x => x.id_hash === cc.id_hash);
-                        if (!c) { c = { name: cc.id_hash.slice(0, 6), id_hash: cc.id_hash, pubJwk: cc.pubJwk, notifUrl: cc.notifUrl, notifToken: cc.notifToken, pushCard: cc.pushCard }; contacts.push(c); }
-                        else { c.pubJwk = c.pubJwk || cc.pubJwk; if (cc.notifUrl) c.notifUrl = cc.notifUrl; if (cc.notifToken) c.notifToken = cc.notifToken; if (cc.pushCard) c.pushCard = cc.pushCard; }
-                        await saveEncrypted(me.userKey, LS_KEYS.enc_contacts, contacts);
-                        renderContacts(contacts);
-                    } else if (item.payload?.type === 'control' && item.payload.content?.kind === 'push-card') {
-                        const pc = item.payload.content;
-                        let c = contacts.find(x => x.id_hash === pc.id_hash);
-                        if (!c) { c = { name: pc.id_hash.slice(0, 6), id_hash: pc.id_hash, pubJwk: null, pushCard: pc.card }; contacts.push(c); }
-                        else { c.pushCard = pc.card; }
-                        await saveEncrypted(me.userKey, LS_KEYS.enc_contacts, contacts);
-                        renderContacts(contacts);
                     }
                 }
             } catch (e) { /* network hiccup ok */ }
