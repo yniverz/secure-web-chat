@@ -37,3 +37,26 @@ HOST=0.0.0.0 PORT=8443 \
 - Ad hoc certs are generated in a temporary directory and last only for the server lifetime (valid 1 day).
 - For a smoother developer experience without warnings, consider generating a local CA and certs with `mkcert` and trust it on your system, then point `SSL_CERTFILE`/`SSL_KEYFILE` to those files.
 - Production deployments should terminate TLS with a proper certificate (e.g., via a reverse proxy like nginx/traefik or a cloud load balancer).
+
+## Server-side Web Push (optional)
+
+If you enable notifications in the UI (bell button), the client registers a minimal push card with the server at `/push/register`. When the server receives a message for that `id_hash`, it will attempt to send a Web Push notification, throttled to once per recipient per window.
+
+- Throttle window is configured by `PUSH_THROTTLE_SECONDS` (default `5`).
+- Only the following fields are stored per `id_hash`:
+  - subscription.endpoint
+  - subscription.keys.p256dh
+  - subscription.keys.auth
+  - VAPID public key
+  - VAPID private key
+  - VAPID subject email (optional)
+
+Install requirements:
+
+```sh
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+If `pywebpush` isn't installed or import fails, the server will still accept and store messages; only the push notification step will be skipped.

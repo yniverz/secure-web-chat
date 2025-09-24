@@ -31,3 +31,32 @@ self.addEventListener('fetch', (e) => {
     );
   }
 });
+
+// Handle incoming push and display a notification
+self.addEventListener('push', (event) => {
+  let data = {};
+  try { data = event.data ? event.data.json() : {}; } catch { data = {}; }
+  const title = data.title || 'Secure Chat';
+  const body = data.preview || data.body || 'New message';
+  const tag = data.tag || 'secure-chat-msg';
+  const options = {
+    body,
+    icon: './icons/icon-192.png',
+    badge: './icons/icon-192.png',
+    data,
+  };
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const url = self.registration.scope || '/';
+  event.waitUntil(
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+      for (const client of clientList) {
+        if ('focus' in client) return client.focus();
+      }
+      if (clients.openWindow) return clients.openWindow(url);
+    })
+  );
+});

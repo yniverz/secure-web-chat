@@ -5,10 +5,20 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta, timezone
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, JSON, Text, select, delete
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, JSON, Text, select, delete, func
 from sqlalchemy.orm import declarative_base, sessionmaker
 import secrets
 import string
+import os
+import json
+
+# Optional dependency for Web Push
+try:
+    from pywebpush import webpush, WebPushException
+except Exception:  # pragma: no cover
+    webpush = None
+    WebPushException = Exception
+
 
 DB_URL = "sqlite:///chat.db"
 engine = create_engine(DB_URL, future=True)
@@ -80,6 +90,32 @@ class ShareCreateResp(BaseModel):
 class ShareGetResp(BaseModel):
     blob: Dict[str, Any]
 
+
+# Push storage: minimal info needed to send web push for an id_hash
+class PushInfo(Base):
+    __tablename__ = "push_info"
+    id = Column(Integer, primary_key=True)
+    id_hash = Column(String(64), unique=True, index=True, nullable=False)
+    # Minimal set needed for web push
+    endpoint = Column(Text, nullable=False)
+    p256dh = Column(String(200), nullable=False)
+    auth = Column(String(100), nullable=False)
+    vapid_public_key = Column(String(200), nullable=False)
+    vapid_private_key = Column(Text, nullable=False)
+    subject_email = Column(String(200), nullable=True)
+    last_notified_at = Column(DateTime, nullable=True)
+
+Base.metadata.create_all(engine)
+
+# Pydantic schema for push register
+class PushRegisterReq(BaseModel):
+    id_hash: str
+    card: Dict[str, Any]  # { subscription: {endpoint, keys:{p256dh,auth}}, vapid:{public_key, private_key, subject_email?} }
+
+class PushRegisterResp(BaseModel):
+    ok: bool
+
+
 # ---- Helpers ----
 ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no confusing chars
 
@@ -110,6 +146,52 @@ def push_message(req: PushMsgReq):
         db.add(m)
         db.flush()            # <-- assigns PK while session is live
         msg_id = m.id         # <-- capture now
+        # Attempt to trigger a notification if allowed (throttled)
+        try:
+            pi = db.execute(select(PushInfo).where(PushInfo.id_hash == req.to_id_hash)).scalar_one_or_none()
+            if pi and webpush is not None:
+                # Throttle window in seconds (env configurable, default 5s)
+                throttle_s = int(os.getenv("PUSH_THROTTLE_SECONDS", "5") or 5)
+                now = datetime.utcnow()
+                can_notify = True
+                if pi.last_notified_at is not None:
+                    delta = now - (pi.last_notified_at if pi.last_notified_at.tzinfo is None else pi.last_notified_at.replace(tzinfo=None))
+                    can_notify = delta.total_seconds() >= throttle_s
+                if can_notify:
+                    payload = {}
+                    try:
+                        # Optional small preview if it's a standard chat message
+                        if req.payload and isinstance(req.payload, dict):
+                            if req.payload.get("type") == "msg":
+                                payload = {"title": "Secure Chat", "preview": "New message", "tag": "secure-chat-msg"}
+                            elif req.payload.get("type") == "control":
+                                payload = {"title": "Secure Chat", "preview": "Update", "tag": "secure-chat-ctrl"}
+                    except Exception:
+                        payload = {}
+                    try:
+                        webpush(
+                            subscription_info={
+                                "endpoint": pi.endpoint,
+                                "keys": {"p256dh": pi.p256dh, "auth": pi.auth}
+                            },
+                            data=json.dumps(payload),
+                            vapid_private_key=pi.vapid_private_key,
+                            vapid_claims={"sub": pi.subject_email or "mailto:you@example.com"},
+                            vapid_public_key=pi.vapid_public_key
+                        )
+                        pi.last_notified_at = now
+                    except WebPushException as e:
+                        # If gone/unauthorized, drop the push info to avoid repeated failures
+                        code = getattr(e, "response", None).status_code if getattr(e, "response", None) else None
+                        if code in (404, 410):
+                            db.delete(pi)
+                        else:
+                            # keep but log
+                            print(f"[WARN] WebPush failed: {e}")
+                # else: throttled
+        except Exception as e:
+            # Don’t block message insertion on push issues
+            print(f"[WARN] Push notify attempt failed: {e}")
         db.commit()
     return {"ok": True, "id": msg_id}
 
@@ -158,6 +240,47 @@ def share_get(code4: str):
         # db.delete(slot); db.commit()
         return ShareGetResp(blob=slot.blob)
 
+
+@app.post("/push/register", response_model=PushRegisterResp)
+def push_register(req: PushRegisterReq):
+    # Validate card shape minimally
+    if not req.id_hash or not isinstance(req.card, dict):
+        raise HTTPException(400, "bad request")
+    sub = (req.card or {}).get("subscription") or {}
+    vapid = (req.card or {}).get("vapid") or {}
+    endpoint = sub.get("endpoint")
+    keys = sub.get("keys") or {}
+    p256dh = keys.get("p256dh")
+    auth = keys.get("auth")
+    vpub = vapid.get("public_key")
+    vpriv = vapid.get("private_key")
+    subj = vapid.get("subject_email") or "mailto:you@example.com"
+    if not (endpoint and p256dh and auth and vpub and vpriv):
+        raise HTTPException(400, "missing fields")
+    with SessionLocal() as db:
+        existing = db.execute(select(PushInfo).where(PushInfo.id_hash == req.id_hash)).scalar_one_or_none()
+        if existing:
+            existing.endpoint = endpoint
+            existing.p256dh = p256dh
+            existing.auth = auth
+            existing.vapid_public_key = vpub
+            existing.vapid_private_key = vpriv
+            existing.subject_email = subj
+        else:
+            pi = PushInfo(
+                id_hash=req.id_hash,
+                endpoint=endpoint,
+                p256dh=p256dh,
+                auth=auth,
+                vapid_public_key=vpub,
+                vapid_private_key=vpriv,
+                subject_email=subj,
+            )
+            db.add(pi)
+        db.commit()
+    return PushRegisterResp(ok=True)
+
+
 @app.get("/{path:path}")
 def root(path: str = ""):
     available = [
@@ -201,19 +324,25 @@ def root(path: str = ""):
 
 if __name__ == "__main__":
     import os
-    import tempfile
     import subprocess
     from pathlib import Path
     import uvicorn
+    import stat
 
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", "8000"))
 
     activate_ssl = os.getenv("SSL_MODE", "on").lower() in ("1", "true", "on", "adhoc")
 
-    temp_dir_ctx = None
-    tmp_cert_path = None
-    tmp_key_path = None
+    # Allow explicit certs via env
+    env_certfile = os.getenv("SSL_CERTFILE")
+    env_keyfile = os.getenv("SSL_KEYFILE")
+    # Where to persist generated ad-hoc certs
+    default_store = Path(__file__).resolve().parent / ".adhoc_ssl"
+    store_dir = Path(os.getenv("SSL_STORE_DIR", str(default_store)))
+    store_dir.mkdir(parents=True, exist_ok=True)
+    # Validity of generated cert in days (defaults to 30)
+    ssl_days = int(os.getenv("SSL_DAYS", "30") or 30)
 
     def _gen_adhoc_cert(tmpdir: Path):
         """Generate a self-signed certificate for localhost with SANs using openssl.
@@ -238,7 +367,7 @@ if __name__ == "__main__":
                     "-out",
                     str(cert_path),
                     "-days",
-                    "1",
+                    str(ssl_days),
                     "-subj",
                     "/CN=localhost",
                     "-addext",
@@ -247,6 +376,11 @@ if __name__ == "__main__":
                 check=True,
                 capture_output=True,
             )
+            try:
+                # Restrict key permissions
+                key_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+            except Exception:
+                pass
             return str(cert_path), str(key_path)
         except Exception:
             pass
@@ -287,7 +421,7 @@ IP.2 = ::1
                     "-out",
                     str(cert_path),
                     "-days",
-                    "1",
+                    str(ssl_days),
                     "-config",
                     str(cfg_path),
                     "-extensions",
@@ -296,35 +430,78 @@ IP.2 = ::1
                 check=True,
                 capture_output=True,
             )
+            try:
+                key_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+            except Exception:
+                pass
             return str(cert_path), str(key_path)
         except Exception as e:
             print(f"[WARN] Failed to generate ad hoc cert via openssl: {e}")
             return None, None
 
+    def _cert_is_currently_valid(cert_path: Path) -> bool:
+        """Use openssl to check that the cert is not expired (checkend 0)."""
+        try:
+            res = subprocess.run(
+                ["openssl", "x509", "-checkend", "0", "-noout", "-in", str(cert_path)],
+                capture_output=True,
+            )
+            return res.returncode == 0
+        except Exception:
+            return False
+
     # Decide SSL parameters
     if activate_ssl:
-        temp_dir_ctx = tempfile.TemporaryDirectory(prefix="adhoc-ssl-")
-        tmpdir = Path(temp_dir_ctx.name)
-        tmp_cert_path, tmp_key_path = _gen_adhoc_cert(tmpdir)
-        if tmp_cert_path and tmp_key_path:
-            print(
-                "[INFO] Starting with ad hoc SSL (self-signed, dev-only). "
-                "Set SSL_MODE= to disable or provide SSL_CERTFILE/SSL_KEYFILE for custom certs."
-            )
+        # 1) If explicit certs provided, use them directly.
+        if env_certfile and env_keyfile:
+            print("[INFO] Starting with provided SSL certs (SSL_CERTFILE/SSL_KEYFILE).")
             uvicorn.run(
                 app,
                 host=host,
                 port=port,
                 log_level="info",
-                ssl_certfile=tmp_cert_path,
-                ssl_keyfile=tmp_key_path,
+                ssl_certfile=env_certfile,
+                ssl_keyfile=env_keyfile,
             )
         else:
-            print("[WARN] Falling back to HTTP (no SSL).")
-            uvicorn.run(app, host=host, port=port, log_level="info")
-        # Cleanup TemporaryDirectory on exit
-        if temp_dir_ctx is not None:
-            temp_dir_ctx.cleanup()
+            # 2) Persisted ad hoc certs in store_dir
+            cert_path = store_dir / "cert.pem"
+            key_path = store_dir / "key.pem"
+
+            have_valid = cert_path.exists() and key_path.exists() and _cert_is_currently_valid(cert_path)
+            if not have_valid:
+                # Generate new and save into store_dir
+                tmp_cert, tmp_key = _gen_adhoc_cert(store_dir)
+                if tmp_cert and tmp_key:
+                    # Move/replace into standard names
+                    try:
+                        Path(tmp_cert).replace(cert_path)
+                        Path(tmp_key).replace(key_path)
+                    except Exception:
+                        # Fallback to copy if replace fails
+                        cert_path.write_bytes(Path(tmp_cert).read_bytes())
+                        key_path.write_bytes(Path(tmp_key).read_bytes())
+                    have_valid = True
+                    print(f"[INFO] Generated new ad hoc cert (valid ~{ssl_days} days) at {cert_path}")
+                else:
+                    have_valid = False
+
+            if have_valid:
+                print(
+                    "[INFO] Starting with ad hoc SSL (self-signed, dev-only). "
+                    f"Using persisted certs in {store_dir}. Set SSL_MODE=off to disable or provide SSL_CERTFILE/SSL_KEYFILE."
+                )
+                uvicorn.run(
+                    app,
+                    host=host,
+                    port=port,
+                    log_level="info",
+                    ssl_certfile=str(cert_path),
+                    ssl_keyfile=str(key_path),
+                )
+            else:
+                print("[WARN] Falling back to HTTP (no SSL).")
+                uvicorn.run(app, host=host, port=port, log_level="info")
     else:
         # Plain HTTP
         uvicorn.run(app, host=host, port=port, log_level="info")
