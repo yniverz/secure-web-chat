@@ -11,6 +11,10 @@
 *.sln.docstates
 *.env
 
+/old/
+
+*.db
+
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
 
@@ -416,3 +420,12 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# Project-specific ignores
+server/vapid_keys/
+server/certs/
+server/*.db
+server/*.sqlite3
+server/__pycache__/
+client/.cache/
+node_modules/

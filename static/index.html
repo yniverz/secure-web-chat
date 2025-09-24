@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Secure Chat (Demo)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="format-detection" content="telephone=no" />
+  <meta name="theme-color" content="#0f1115" />
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon-180.png" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="stylesheet" href="styles.css" />
+  <style>/* keep head minimal to avoid any visual changes */</style>
+</head>
+<body>
+  <div class="app" id="app">
+
+    <!-- LOGIN -->
+    <section class="view" id="view-login" aria-labelledby="login-title">
+      <div class="login-wrap">
+        <div class="logo">
+          <div class="dot"></div>
+          <div style="font-weight:800">Secure Chat</div>
+        </div>
+        <div class="card">
+          <h1 id="login-title" style="margin:0 0 8px 0;font-size:20px">Welcome</h1>
+          <form id="login-form" autocomplete="on" novalidate>
+            <div class="field">
+              <label class="label" for="login-username">Username</label>
+              <input class="input" id="login-username" name="username" autocomplete="username" autocapitalize="none" required />
+            </div>
+            <div class="field">
+              <label class="label" for="login-password">Password</label>
+              <input class="input" id="login-password" name="password" type="password" autocomplete="current-password" required />
+            </div>
+            <button class="btn" type="submit">Enter</button>
+            <div class="helper muted">Local-only storage, encrypted by your user hash.</div>
+          </form>
+        </div>
+      </div>
+    </section>
+
+    <!-- CONTACTS -->
+    <section class="view hidden" id="view-contacts" aria-labelledby="contacts-title">
+      <header class="header">
+        <button class="iconbtn" id="logout-btn" title="Log out" aria-label="Log out">⟵</button>
+        <div class="title" id="contacts-title">Chats</div>
+        <div style="margin-left:auto" class="row-actions">
+          <button class="iconbtn" id="share-me" title="Share my contact">🔗</button>
+        </div>
+      </header>
+      <div class="search">
+        <input class="input" id="contact-search" placeholder="Search or enter 8-char to add…" autocomplete="off" />
+      </div>
+      <div class="contacts" id="contacts-list" role="list" aria-label="Contact list"></div>
+    </section>
+
+    <!-- CHAT -->
+    <section class="view hidden" id="view-chat" aria-labelledby="chat-title">
+      <header class="header">
+        <button class="iconbtn" id="back-btn" title="Back" aria-label="Back">⟵</button>
+        <div class="title" id="chat-title">Chat</div>
+        <div style="margin-left:auto" class="row-actions">
+          <button class="iconbtn" id="rename-contact" title="Rename">✏️</button>
+        </div>
+      </header>
+
+      <div class="messages" id="messages" aria-live="polite"></div>
+
+      <form class="composer" id="composer-form" autocomplete="off">
+        <div class="box">
+          <textarea class="input" id="message-input" rows="1" placeholder="Message" enterkeyhint="send"></textarea>
+          <button class="send" id="send-btn" type="submit">➤</button>
+        </div>
+      </form>
+    </section>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
