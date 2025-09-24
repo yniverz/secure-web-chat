@@ -24,12 +24,39 @@ self.addEventListener('activate', (e) => {
 
 self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
-  // Only cache same-origin GET requests for the listed assets; pass-through everything else
   if (e.request.method === 'GET' && url.origin === location.origin) {
-    e.respondWith(
-      caches.match(e.request).then(resp => resp || fetch(e.request))
-    );
+    e.respondWith(caches.match(e.request).then(resp => resp || fetch(e.request)));
   }
 });
 
-// Push/notification handlers removed
+// Generic push handler: payload is a small JSON with {title, body, tag}
+self.addEventListener('push', (event) => {
+  try {
+    const data = event.data ? event.data.json() : { title: 'Secure Chat', body: 'You received a message', tag: 'secure-chat-generic' };
+    const title = data.title || 'Secure Chat';
+    const options = {
+      body: data.body || 'You received a message',
+      tag: data.tag || 'secure-chat-generic',
+      icon: './icons/icon-192.png',
+      badge: './icons/icon-192.png'
+    };
+    event.waitUntil(self.registration.showNotification(title, options));
+  } catch (e) {
+    event.waitUntil(self.registration.showNotification('Secure Chat', { body: 'You received a message', tag: 'secure-chat-generic' }));
+  }
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  event.waitUntil(
+    (async () => {
+      const allClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+      for (const client of allClients) {
+        if ('focus' in client) { client.focus(); return; }
+      }
+      if (self.clients.openWindow) {
+        await self.clients.openWindow('./');
+      }
+    })()
+  );
+});

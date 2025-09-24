@@ -82,7 +82,8 @@ const LS_KEYS = {
     id_hash: 'sc.id_hash',              // server-visible id
     enc_private: 'sc.enc_private',      // AES-GCM by user_key
     enc_public: 'sc.enc_public',        // AES-GCM by user_key (redundant but convenient)
-    enc_contacts: 'sc.enc_contacts'     // AES-GCM by user_key
+    enc_contacts: 'sc.enc_contacts',    // AES-GCM by user_key
+    last_username: 'sc.last_username'
 };
 
 async function loadEncrypted(key, slot, fallback) {
@@ -109,7 +110,107 @@ let messagesByContact = new Map();
 let activeContact = null;
 let pollAbort = null;
 
-/* (notifications removed) */
+/* ========================= PUSH NOTIFICATIONS (reintroduced minimal) =========================
+   Flow:
+   1. After login user can click bell button (#notif-setup) to enable notifications.
+   2. We fetch server VAPID public key (/push/vapid/public) and subscribe via PushManager.
+   3. Subscription JSON + our id_hash are POSTed to /push/subscribe (server stores raw JSON).
+   4. Server sends generic notification (no message content) on incoming message.
+   Privacy: Notification payload is ONLY a generic string; actual encrypted content still polled.
+=============================================================================================== */
+const PUSH_LS = {
+    subscribed: 'sc.push_subscribed'
+};
+
+async function fetchVapidPublicKey() {
+    const res = await api('/push/vapid/public');
+    return res.public_key; // base64url of uncompressed EC point (starts with 0x04)
+}
+
+function b64uToUint8(b64url) {
+    const pad = '='.repeat((4 - (b64url.length % 4)) % 4);
+    const s = b64url.replace(/-/g, '+').replace(/_/g, '/') + pad;
+    const raw = atob(s);
+    const arr = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+    return arr;
+}
+
+function notifButton() { return document.getElementById('notif-setup'); }
+
+function updateNotifButtonState() {
+    const btn = notifButton();
+    if (!btn) return;
+    if (!me?.id_hash) { btn.disabled = true; btn.title = 'Login first'; return; }
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+        btn.disabled = true; btn.title = 'Push not supported in this browser'; return;
+    }
+    btn.disabled = false; btn.title = 'Enable notifications';
+    if (localStorage.getItem(PUSH_LS.subscribed) === '1') {
+        btn.classList.add('hidden');
+    } else {
+        btn.classList.remove('hidden');
+    }
+}
+
+async function ensureServiceWorkerReady() {
+    if (!('serviceWorker' in navigator)) throw new Error('Service worker unsupported');
+    // registration already kicked off at bottom of file
+    const reg = await navigator.serviceWorker.getRegistration('./sw.js') || await navigator.serviceWorker.ready;
+    return reg;
+}
+
+async function subscribePush() {
+    const btn = notifButton();
+    if (btn) btn.disabled = true;
+    try {
+        const perm = await Notification.requestPermission();
+        if (perm !== 'granted') { showToast('Permission denied'); return; }
+        const pubKey = await fetchVapidPublicKey();
+        const reg = await ensureServiceWorkerReady();
+        let sub = await reg.pushManager.getSubscription();
+        if (!sub) {
+            sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64uToUint8(pubKey) });
+        }
+        // send to server
+        await api('/push/subscribe', { method: 'POST', body: JSON.stringify({ id_hash: me.id_hash, subscription: sub.toJSON() }) });
+        localStorage.setItem(PUSH_LS.subscribed, '1');
+        showToast('Notifications enabled');
+    } catch (e) {
+        console.error('Push subscribe failed', e);
+        showToast('Enable failed');
+    } finally {
+        updateNotifButtonState();
+    }
+}
+
+async function resendExistingSubscriptionIfAny() {
+    if (localStorage.getItem(PUSH_LS.subscribed) !== '1') return;
+    try {
+        const reg = await ensureServiceWorkerReady();
+        const sub = await reg.pushManager.getSubscription();
+        if (sub && me?.id_hash) {
+            await api('/push/subscribe', { method: 'POST', body: JSON.stringify({ id_hash: me.id_hash, subscription: sub.toJSON() }) });
+        }
+    } catch (e) { /* silent */ }
+}
+
+function wireNotifButtonOnce() {
+    const btn = notifButton();
+    if (!btn || btn._wired) return;
+    btn._wired = true;
+    btn.addEventListener('click', () => {
+        if (!me?.id_hash) { showToast('Login first'); return; }
+        subscribePush();
+    });
+}
+
+function initNotificationsUI() {
+    wireNotifButtonOnce();
+    updateNotifButtonState();
+    // Try to re-associate existing subscription after login
+    resendExistingSubscriptionIfAny();
+}
 
 /* ========================= VIEW WIRING (same UI as before + extras) ========================= */
 const V = {
@@ -247,7 +348,7 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
 
     await startPolling();
     renderContacts(contacts);
-    // notifications removed
+    initNotificationsUI();
     show('contacts');
 });
 
@@ -419,5 +520,7 @@ window.ChatAppAPI = {
 if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
         navigator.serviceWorker.register('./sw.js').catch(() => {});
+        // If user already logged in from a previous session (not persisted here) we'd init, but for now just button state
+        setTimeout(updateNotifButtonState, 300);
     });
 }

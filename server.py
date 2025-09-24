@@ -8,6 +8,21 @@ from sqlalchemy import create_engine, Column, Integer, String, DateTime, JSON, T
 from sqlalchemy.orm import declarative_base, sessionmaker
 import secrets
 import os
+import json
+
+# Optional push deps (lazy)
+try:  # pragma: no cover
+    from pywebpush import webpush, WebPushException
+except Exception:  # pragma: no cover
+    webpush = None
+    class WebPushException(Exception):
+        pass
+try:  # pragma: no cover
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives import serialization
+except Exception:  # pragma: no cover
+    ec = None
+    serialization = None
 
 # ---- DB ----
 DATABASE_URL = "sqlite:///./chat.db"
@@ -35,6 +50,22 @@ class ShareSlot(Base):
     blob = Column(JSON, nullable=False)  # AES-GCM {iv, ct}
     expires_at = Column(DateTime, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+Base.metadata.create_all(engine)
+
+class VapidKey(Base):
+    __tablename__ = "vapid_key"
+    id = Column(Integer, primary_key=True)
+    public_key = Column(String(128), nullable=False)
+    private_key = Column(String(128), nullable=False)  # base64url no padding raw scalar for P-256
+    subject_email = Column(String(255), nullable=False, default="mailto:example@example.com")
+
+class PushSubscription(Base):
+    __tablename__ = "push_subscriptions"
+    id = Column(Integer, primary_key=True)
+    id_hash = Column(String(64), index=True, unique=True, nullable=False)
+    subscription = Column(JSON, nullable=False)  # raw subscription JSON from client
+    last_notified_at = Column(DateTime, nullable=True)
 
 Base.metadata.create_all(engine)
 
@@ -78,11 +109,62 @@ class ShareCreateResp(BaseModel):
 class ShareGetResp(BaseModel):
     blob: Dict[str, Any]
 
+class VapidPublicResp(BaseModel):
+    public_key: str
+    subject_email: str
+
+class PushSubscribeReq(BaseModel):
+    id_hash: str
+    subscription: Dict[str, Any]
+
+class PushSubscribeResp(BaseModel):
+    ok: bool
+
 # ---- Helpers ----
 ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no confusing chars
 
 def gen_code4():
     return "".join(secrets.choice(ALPHABET) for _ in range(4))
+
+def _b64u(b: bytes) -> str:
+    import base64
+    return base64.urlsafe_b64encode(b).decode('ascii').rstrip('=')
+
+def _ensure_vapid_key(db):
+    vk = db.execute(select(VapidKey)).scalar_one_or_none()
+    if vk:
+        return vk
+    if ec is None:
+        raise RuntimeError("cryptography not available for VAPID key generation")
+    # Generate new P-256 keypair
+    try:
+        priv_obj = ec.generate_private_key(ec.SECP256R1())
+    except TypeError:  # very old cryptography fallback
+        from cryptography.hazmat.backends import default_backend  # pragma: no cover
+        priv_obj = ec.generate_private_key(ec.SECP256R1(), default_backend())
+    priv_numbers = priv_obj.private_numbers()
+    pub_numbers = priv_obj.public_key().public_numbers()
+    # VAPID public key is uncompressed EC point (0x04 + X + Y), both 32B big endian
+    x = pub_numbers.x.to_bytes(32, 'big')
+    y = pub_numbers.y.to_bytes(32, 'big')
+    public_key = _b64u(b"\x04" + x + y)
+    private_key = _b64u(priv_numbers.private_value.to_bytes(32, 'big'))
+    vk = VapidKey(public_key=public_key, private_key=private_key, subject_email="mailto:notify@example.com")
+    db.add(vk); db.commit(); db.refresh(vk)
+    return vk
+
+def _vapid_priv_pem(vk: VapidKey) -> str:
+    """Convert stored raw scalar (base64url) to PEM EC PRIVATE KEY."""
+    import base64
+    if ec is None:
+        raise RuntimeError("cryptography not available")
+    raw = base64.urlsafe_b64decode(vk.private_key + '==')  # scalar 32 bytes
+    priv_int = int.from_bytes(raw, 'big')
+    priv_obj = ec.derive_private_key(priv_int, ec.SECP256R1())
+    pem = priv_obj.private_bytes(encoding=serialization.Encoding.PEM,
+                                 format=serialization.PrivateFormat.PKCS8,
+                                 encryption_algorithm=serialization.NoEncryption())
+    return pem.decode('ascii')
 
 # ---- Routes ----
 @app.post("/id/reserve", response_model=ReserveResp)
@@ -103,10 +185,24 @@ def push_message(req: PushMsgReq):
         raise HTTPException(400, "missing to_id_hash")
     with SessionLocal() as db:
         m = Message(to_id_hash=req.to_id_hash, payload=req.payload)
-        db.add(m)
-        db.flush()
-        msg_id = m.id
-        db.commit()
+        db.add(m); db.flush(); msg_id = m.id; db.commit()
+        # After storing, attempt to send a generic notification (no content) if subscription exists
+        try:
+            if webpush is not None:
+                sub = db.execute(select(PushSubscription).where(PushSubscription.id_hash == req.to_id_hash)).scalar_one_or_none()
+                if sub:
+                    vk = _ensure_vapid_key(db)
+                    payload = {"title": "Secure Chat", "body": "You received a message", "tag": "secure-chat-generic"}
+                    webpush(
+                        subscription_info=sub.subscription,
+                        data=json.dumps(payload),
+                        vapid_private_key=_vapid_priv_pem(vk),
+                        vapid_claims={"sub": vk.subject_email},
+                    )
+        except WebPushException:
+            pass  # best effort
+        except Exception:
+            pass
     return {"ok": True, "id": msg_id}
 
 @app.post("/messages/poll", response_model=PollResp)
@@ -150,6 +246,30 @@ def share_get(code4: str):
             db.commit()
             raise HTTPException(410, "expired")
         return ShareGetResp(blob=slot.blob)
+
+@app.get("/push/vapid/public", response_model=VapidPublicResp)
+def get_vapid_public():
+    with SessionLocal() as db:
+        vk = _ensure_vapid_key(db)
+        return VapidPublicResp(public_key=vk.public_key, subject_email=vk.subject_email)
+
+@app.post("/push/subscribe", response_model=PushSubscribeResp)
+def push_subscribe(req: PushSubscribeReq):
+    if not req.id_hash or not isinstance(req.subscription, dict):
+        raise HTTPException(400, "bad request")
+    endpoint = req.subscription.get("endpoint")
+    keys = (req.subscription.get("keys") or {})
+    if not endpoint or not keys.get("p256dh") or not keys.get("auth"):
+        raise HTTPException(400, "missing subscription fields")
+    with SessionLocal() as db:
+        existing = db.execute(select(PushSubscription).where(PushSubscription.id_hash == req.id_hash)).scalar_one_or_none()
+        if existing:
+            existing.subscription = req.subscription
+        else:
+            db.add(PushSubscription(id_hash=req.id_hash, subscription=req.subscription))
+        _ensure_vapid_key(db)  # make sure key exists
+        db.commit()
+    return PushSubscribeResp(ok=True)
 
 # ---- Static files (dev) ----
 @app.get("/{path:path}")
