@@ -18,6 +18,65 @@ try:
 except Exception:  # pragma: no cover
     webpush = None
     WebPushException = Exception
+try:
+    from cryptography.hazmat.primitives.serialization import (
+        load_der_private_key,
+        Encoding,
+        PrivateFormat,
+        NoEncryption,
+    )
+except Exception:
+    load_der_private_key = None
+
+
+def _b64u_to_b64(s: str) -> str:
+    s = s.replace('-', '+').replace('_', '/')
+    pad = '=' * ((4 - len(s) % 4) % 4)
+    return s + pad
+
+
+def _pkcs8_der_b64u_to_pem(b64u: str) -> str:
+    """Convert base64url-encoded PKCS8 DER to PEM string."""
+    # If already PEM, return as-is
+    if b64u.strip().startswith('-----BEGIN'):
+        return b64u
+    from textwrap import wrap
+    b64 = _b64u_to_b64(b64u)
+    lines = '\n'.join(wrap(b64, 64))
+    return f"-----BEGIN PRIVATE KEY-----\n{lines}\n-----END PRIVATE KEY-----\n"
+
+
+def _ec_sec1_der_b64u_to_pem(b64u: str) -> str:
+    # Some stacks expect SEC1 EC PRIVATE KEY instead of generic PKCS8
+    if b64u.strip().startswith('-----BEGIN'):
+        return b64u
+    from textwrap import wrap
+    b64 = _b64u_to_b64(b64u)
+    lines = '\n'.join(wrap(b64, 64))
+    return f"-----BEGIN EC PRIVATE KEY-----\n{lines}\n-----END EC PRIVATE KEY-----\n"
+
+
+def _coerce_vapid_priv_to_pem(s: str) -> str:
+    """Accepts base64url DER or PEM and returns a valid PEM for cryptography/pywebpush."""
+    if s.strip().startswith('-----BEGIN'):
+        return s
+    # Prefer proper DER->PEM via cryptography if available
+    if load_der_private_key is not None:
+        try:
+            import base64
+            b64 = _b64u_to_b64(s)
+            der = base64.b64decode(b64)
+            key = load_der_private_key(der, password=None)
+            pem = key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()).decode('ascii')
+            return pem
+        except Exception:
+            # fall through to simple wrappers
+            pass
+    # Last resort: try raw PEM wrappers
+    try:
+        return _pkcs8_der_b64u_to_pem(s)
+    except Exception:
+        return _ec_sec1_der_b64u_to_pem(s)
 
 
 DB_URL = "sqlite:///chat.db"
@@ -175,12 +234,33 @@ def push_message(req: PushMsgReq):
                                 "keys": {"p256dh": pi.p256dh, "auth": pi.auth}
                             },
                             data=json.dumps(payload),
-                            vapid_private_key=pi.vapid_private_key,
+                            vapid_private_key=_coerce_vapid_priv_to_pem(pi.vapid_private_key),
                             vapid_claims={"sub": pi.subject_email or "mailto:you@example.com"},
-                            vapid_public_key=pi.vapid_public_key
                         )
                         pi.last_notified_at = now
                     except WebPushException as e:
+                        # Retry with EC PRIVATE KEY label if PEM parse failed
+                        if 'Could not deserialize key data' in str(e):
+                            try:
+                                webpush(
+                                    subscription_info={
+                                        "endpoint": pi.endpoint,
+                                        "keys": {"p256dh": pi.p256dh, "auth": pi.auth}
+                                    },
+                                    data=json.dumps(payload),
+                                    vapid_private_key=_coerce_vapid_priv_to_pem(pi.vapid_private_key),
+                                    vapid_claims={"sub": pi.subject_email or "mailto:you@example.com"},
+                                )
+                                pi.last_notified_at = now
+                                e = None
+                            except WebPushException as e2:
+                                e = e2
+                        if e:
+                            code = getattr(e, "response", None).status_code if getattr(e, "response", None) else None
+                            if code in (404, 410):
+                                db.delete(pi)
+                            else:
+                                print(f"[WARN] WebPush failed: {e}")
                         # If gone/unauthorized, drop the push info to avoid repeated failures
                         code = getattr(e, "response", None).status_code if getattr(e, "response", None) else None
                         if code in (404, 410):

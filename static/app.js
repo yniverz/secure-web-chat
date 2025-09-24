@@ -184,15 +184,6 @@ function updateNotifButtonVisibility() {
     } catch {}
 }
 
-async function getMyPushCardPublic() {
-    const card = await loadEncrypted(me.userKey, LS_KEYS.enc_push_card, null);
-    if (!card || !card.subscription) return null;
-    return {
-        device_name: card.device_name,
-        subscription: card.subscription
-    };
-}
-
 async function getMyPushCardSendable() {
     const card = await loadEncrypted(me.userKey, LS_KEYS.enc_push_card, null);
     if (!card || !card.subscription || !card.config?.private_key || !card.config?.public_key) return null;

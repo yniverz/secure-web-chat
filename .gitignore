@@ -11,6 +11,8 @@
 *.sln.docstates
 *.env
 
+.venv
+
 /old/
 
 *.db
