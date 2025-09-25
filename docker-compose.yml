@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   secure-web-chat:
     build: .
