@@ -45,3 +45,24 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
+
+## Docker
+
+Build and run with Docker Compose (dev HTTPS enabled by default):
+
+```sh
+docker compose up --build
+```
+
+Then open:
+
+- HTTPS (self-signed): https://localhost:8001
+
+Environment overrides:
+
+- To disable HTTPS inside the container (e.g., when terminating TLS with a reverse proxy), set `SSL_MODE=off` in `docker-compose.yml`.
+- To use your own certs, mount them and set `SSL_CERTFILE` and `SSL_KEYFILE`.
+
+Data persistence:
+
+- The SQLite database `chat.db` and ad hoc SSL artifacts are stored under the named volume `swc_data` at `/data` inside the container.

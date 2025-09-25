@@ -1,13 +1,23 @@
 services:
   secure-web-chat:
-    build: .
+    build:
+      context: .
     container_name: secure-web-chat
     ports:
       - "8001:8000"   # host:container (host 8001 → container 8000)
+    environment:
+      # Enable dev HTTPS by default; set to "off" in prod or terminate TLS upstream
+      - SSL_MODE=adhoc
+      - HOST=0.0.0.0
+      - PORT=8000
     volumes:
-      - swc_data:/data   # runtime files like chat.db are persisted here
+      - swc_data:/data   # runtime files like chat.db and .adhoc_ssl persist here
     restart: unless-stopped
-    working_dir: /data
+    healthcheck:
+      test: ["CMD-SHELL", "if [ \"$$SSL_MODE\" = \"adhoc\" ]; then curl -kfsS https://localhost:8000/; else curl -fsS http://localhost:8000/; fi"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     command: ["python", "/opt/app/server.py"]
 
 volumes:
