@@ -138,18 +138,28 @@ function b64uToUint8(b64url) {
 
 function notifButton() { return document.getElementById('notif-setup'); }
 
-function updateNotifButtonState() {
+async function updateNotifButtonState() {
     const btn = notifButton();
     if (!btn) return;
-    if (!me?.id_hash) { btn.disabled = true; btn.title = 'Login first'; return; }
-    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+    if (!me?.id_hash) { btn.disabled = true; btn.title = 'Login first'; btn.classList.add('u-hidden'); return; }
+    if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
         btn.disabled = true; btn.title = 'Push not supported in this browser'; return;
     }
     btn.disabled = false; btn.title = 'Enable notifications';
-    if (localStorage.getItem(PUSH_LS.subscribed) === '1') {
-        btn.classList.add('hidden');
-    } else {
-        btn.classList.remove('hidden');
+
+    try {
+        // Hide if permission is already granted or if there's an existing subscription
+        const perm = Notification.permission;
+    if (perm === 'granted') { btn.classList.add('u-hidden'); return; }
+        // Check stored flag or actual subscription existence
+    if (localStorage.getItem(PUSH_LS.subscribed) === '1') { btn.classList.add('u-hidden'); return; }
+        const reg = await navigator.serviceWorker.getRegistration('./sw.js') || await navigator.serviceWorker.ready;
+        const sub = await reg?.pushManager?.getSubscription();
+        if (sub) { btn.classList.add('u-hidden'); return; }
+        btn.classList.remove('u-hidden');
+    } catch {
+        // On error, leave button visible so user can retry
+        btn.classList.remove('u-hidden');
     }
 }
 

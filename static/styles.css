@@ -9,7 +9,7 @@
     --bubble-me: #2b7cff;
     --bubble-them: #232a3a;
     --radius: 16px;
-    --header-h: 56px;
+    --header-h: 60px;
     --footer-h: 60px;
     --safe-bottom: env(safe-area-inset-bottom, 0);
     --safe-top: env(safe-area-inset-top, 0);
@@ -48,8 +48,8 @@ body {
 .view.slide-left { transform: translateX(-6%); }
 .view.slide-right { transform: translateX(6%) }
 .header {
-    height: var(--header-h);
-    padding: calc(6px + var(--safe-top)) 14px 6px 8px;
+    min-height: var(--header-h);
+    padding: calc(10px + var(--safe-top)) 14px 10px 8px;
     display: flex;
     align-items: center;
     gap: 8px;
@@ -59,12 +59,13 @@ body {
     top: 0;
     z-index: 5
 }
+.u-hidden { display: none !important }
 .iconbtn {
     border: 0;
     background: transparent;
     color: var(--text);
-    width: 36px;
-    height: 36px;
+    width: 38px;
+    height: 38px;
     border-radius: 10px;
     display: grid;
     place-items: center;
@@ -248,4 +249,9 @@ textarea.input {
 .row-actions { display: flex; gap: 8px }
 @media (min-width:768px) {
     .app { border-left: 1px solid #1b2130; border-right: 1px solid #1b2130; }
+}
+
+/* Slightly tighter desktop header; mobile already handled above */
+@media (min-width: 480px) {
+    .header { padding: calc(8px + var(--safe-top)) 16px 8px 12px; }
 }
