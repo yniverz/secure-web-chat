@@ -376,15 +376,25 @@ V.search.addEventListener('input', async () => {
             const blob = await aesDecrypt(key, res.blob);
             // blob: { id_hash, pubJwk, name }
             // Add/merge contact (you choose a name locally)
-            const existing = contacts.find(c => c.id_hash === blob.id_hash);
-            if (!existing) {
-                const newC = { name: blob.name || blob.id_hash.slice(0, 6), id_hash: blob.id_hash, pubJwk: blob.pubJwk };
-                contacts.push(newC);
-                await saveEncrypted(me.userKey, LS_KEYS.enc_contacts, contacts);
-                renderContacts(contacts);
+            let c = contacts.find(c => c.id_hash === blob.id_hash);
+            if (!c) {
+                c = { name: blob.name || blob.id_hash.slice(0, 6), id_hash: blob.id_hash, pubJwk: blob.pubJwk };
+                contacts.push(c);
+            } else {
+                // Merge/refresh info
+                c.pubJwk = blob.pubJwk || c.pubJwk;
+                c.name = c.name || blob.name || c.id_hash.slice(0, 6);
             }
+            await saveEncrypted(me.userKey, LS_KEYS.enc_contacts, contacts);
+            renderContacts(contacts);
             showToast('Contact imported!');
             V.search.value = '';
+            // Proactively introduce ourselves so the other peer adds us too
+            try {
+                await sendIntroToPeer(c);
+            } catch (e) {
+                console.warn('Intro send failed', e);
+            }
             // notifications removed: no back card/control message
         } catch (e) { showToast('Invalid 8-char code'); }
     } else {
@@ -495,12 +505,46 @@ async function startPolling() {
                             console.error('Decrypt failed for incoming message', e, item);
                             showToast('Received a message I could not decrypt.');
                         }
+                    } else if (item.payload?.type === 'intro') {
+                        try {
+                            const intro = await hybridDecryptRSAOaep(me.privJwk, item.payload.content);
+                            // intro: { id_hash, name, pubJwk }
+                            const fromId = intro.id_hash;
+                            if (!fromId) continue;
+                            let c = contacts.find(x => x.id_hash === fromId);
+                            if (!c) {
+                                c = { name: (intro.name || fromId.slice(0, 6)), id_hash: fromId, pubJwk: intro.pubJwk || null };
+                                contacts.push(c);
+                            } else {
+                                // Merge/update
+                                c.name = c.name || intro.name || c.name;
+                                c.pubJwk = intro.pubJwk || c.pubJwk;
+                            }
+                            await saveEncrypted(me.userKey, LS_KEYS.enc_contacts, contacts);
+                            renderContacts(contacts);
+                            showToast(`${c.name} added you`);
+                        } catch (e) {
+                            console.error('Failed to process intro', e, item);
+                        }
                     }
                 }
             } catch (e) { /* network hiccup ok */ }
             await sleep(POLL_MS);
         }
     })();
+}
+
+/* ========================= Intro handshake ========================= */
+async function sendIntroToPeer(contact) {
+    if (!contact?.id_hash || !contact?.pubJwk) throw new Error('Contact missing id or pub key');
+    if (!me?.id_hash || !me?.pubJwk) throw new Error('Not logged in');
+    const content = await hybridEncryptRSAOaep(contact.pubJwk, {
+        id_hash: me.id_hash,
+        name: me.username,
+        pubJwk: me.pubJwk,
+        ts: Date.now()
+    });
+    await api('/messages/push', { method: 'POST', body: JSON.stringify({ to_id_hash: contact.id_hash, payload: { type: 'intro', content } }) });
 }
 
 /* ========================= Minimal ChatAppAPI shim (optional) =========================

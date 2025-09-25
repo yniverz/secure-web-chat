@@ -1,3 +1,5 @@
+import base64
+import traceback
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
@@ -17,12 +19,9 @@ except Exception:  # pragma: no cover
     webpush = None
     class WebPushException(Exception):
         pass
-try:  # pragma: no cover
-    from cryptography.hazmat.primitives.asymmetric import ec
-    from cryptography.hazmat.primitives import serialization
-except Exception:  # pragma: no cover
-    ec = None
-    serialization = None
+    
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives import serialization
 
 # ---- DB ----
 DATABASE_URL = "sqlite:///./chat.db"
@@ -130,41 +129,38 @@ def _b64u(b: bytes) -> str:
     import base64
     return base64.urlsafe_b64encode(b).decode('ascii').rstrip('=')
 
+
+def vapid_public_key_b64url(priv: ec.EllipticCurvePrivateKey) -> str:
+    raw_bytes = priv.public_key().public_bytes(
+        encoding=serialization.Encoding.X962,
+        format=serialization.PublicFormat.UncompressedPoint
+    )
+    return base64.urlsafe_b64encode(raw_bytes).rstrip(b"=").decode()
+
+def vapid_private_key_b64url(priv: ec.EllipticCurvePrivateKey) -> str:
+    # 32-byte big-endian scalar (the secret number d)
+    d_bytes = priv.private_numbers().private_value.to_bytes(32, 'big')
+    return base64.urlsafe_b64encode(d_bytes).rstrip(b"=").decode()
+        
+
 def _ensure_vapid_key(db):
     vk = db.execute(select(VapidKey)).scalar_one_or_none()
     if vk:
         return vk
-    if ec is None:
-        raise RuntimeError("cryptography not available for VAPID key generation")
+    
     # Generate new P-256 keypair
     try:
         priv_obj = ec.generate_private_key(ec.SECP256R1())
     except TypeError:  # very old cryptography fallback
         from cryptography.hazmat.backends import default_backend  # pragma: no cover
         priv_obj = ec.generate_private_key(ec.SECP256R1(), default_backend())
-    priv_numbers = priv_obj.private_numbers()
-    pub_numbers = priv_obj.public_key().public_numbers()
-    # VAPID public key is uncompressed EC point (0x04 + X + Y), both 32B big endian
-    x = pub_numbers.x.to_bytes(32, 'big')
-    y = pub_numbers.y.to_bytes(32, 'big')
-    public_key = _b64u(b"\x04" + x + y)
-    private_key = _b64u(priv_numbers.private_value.to_bytes(32, 'big'))
+
+    public_key = vapid_public_key_b64url(priv_obj)
+    private_key = vapid_private_key_b64url(priv_obj)
+
     vk = VapidKey(public_key=public_key, private_key=private_key, subject_email="mailto:notify@example.com")
     db.add(vk); db.commit(); db.refresh(vk)
     return vk
-
-def _vapid_priv_pem(vk: VapidKey) -> str:
-    """Convert stored raw scalar (base64url) to PEM EC PRIVATE KEY."""
-    import base64
-    if ec is None:
-        raise RuntimeError("cryptography not available")
-    raw = base64.urlsafe_b64decode(vk.private_key + '==')  # scalar 32 bytes
-    priv_int = int.from_bytes(raw, 'big')
-    priv_obj = ec.derive_private_key(priv_int, ec.SECP256R1())
-    pem = priv_obj.private_bytes(encoding=serialization.Encoding.PEM,
-                                 format=serialization.PrivateFormat.PKCS8,
-                                 encryption_algorithm=serialization.NoEncryption())
-    return pem.decode('ascii')
 
 # ---- Routes ----
 @app.post("/id/reserve", response_model=ReserveResp)
@@ -192,17 +188,17 @@ def push_message(req: PushMsgReq):
                 sub = db.execute(select(PushSubscription).where(PushSubscription.id_hash == req.to_id_hash)).scalar_one_or_none()
                 if sub:
                     vk = _ensure_vapid_key(db)
-                    payload = {"title": "Secure Chat", "body": "You received a message", "tag": "secure-chat-generic"}
+                    payload = {"title": "Notification", "body": "You received a message", "tag": "secure-chat-generic"}
                     webpush(
                         subscription_info=sub.subscription,
                         data=json.dumps(payload),
-                        vapid_private_key=_vapid_priv_pem(vk),
+                        vapid_private_key=vk.private_key,
                         vapid_claims={"sub": vk.subject_email},
                     )
         except WebPushException:
-            pass  # best effort
+            print(traceback.format_exc())
         except Exception:
-            pass
+            print(traceback.format_exc())
     return {"ok": True, "id": msg_id}
 
 @app.post("/messages/poll", response_model=PollResp)
@@ -245,7 +241,11 @@ def share_get(code4: str):
             db.delete(slot)
             db.commit()
             raise HTTPException(410, "expired")
-        return ShareGetResp(blob=slot.blob)
+        # One-time use: consume and delete the slot upon successful retrieval
+        blob = slot.blob
+        db.delete(slot)
+        db.commit()
+        return ShareGetResp(blob=blob)
 
 @app.get("/push/vapid/public", response_model=VapidPublicResp)
 def get_vapid_public():
