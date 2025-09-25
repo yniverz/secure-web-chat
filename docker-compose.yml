@@ -1,0 +1,16 @@
+version: "3.9"
+
+services:
+  secure-web-chat:
+    build: .
+    container_name: secure-web-chat
+    ports:
+      - "8001:8000"   # host:container (host 8001 → container 8000)
+    volumes:
+      - swc_data:/data   # runtime files like chat.db are persisted here
+    restart: unless-stopped
+    working_dir: /data
+    command: ["python", "/opt/app/server.py"]
+
+volumes:
+  swc_data:
