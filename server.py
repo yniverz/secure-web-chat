@@ -2,7 +2,7 @@ import base64
 import traceback
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta, timezone
@@ -10,6 +10,7 @@ from sqlalchemy import create_engine, Column, Integer, String, DateTime, JSON, T
 from sqlalchemy.orm import declarative_base, sessionmaker
 import secrets
 import os
+from pathlib import Path
 import json
 
 # Optional push deps (lazy)
@@ -272,6 +273,8 @@ def push_subscribe(req: PushSubscribeReq):
     return PushSubscribeResp(ok=True)
 
 # ---- Static files (dev) ----
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+
 @app.get("/{path:path}")
 def root(path: str = ""):
     available = [
@@ -292,30 +295,26 @@ def root(path: str = ""):
     if path == "":
         path = "index.html"
 
-    fs_path = f"static/{path}"
+    fs_path = (STATIC_DIR / path)
+    fs_path_str = str(fs_path)
 
-    if fs_path.endswith(".html"):
+    if fs_path_str.endswith(".html"):
         content_type = "text/html"
-        mode = "r"
-    elif fs_path.endswith(".js"):
+    elif fs_path_str.endswith(".js"):
         content_type = "application/javascript"
-        mode = "r"
-    elif fs_path.endswith(".css"):
+    elif fs_path_str.endswith(".css"):
         content_type = "text/css"
-        mode = "r"
-    elif fs_path.endswith(".webmanifest"):
+    elif fs_path_str.endswith(".webmanifest"):
         content_type = "application/manifest+json"
-        mode = "r"
-    elif fs_path.endswith(".png"):
+    elif fs_path_str.endswith(".png"):
         content_type = "image/png"
-        mode = "rb"
     else:
         content_type = "application/octet-stream"
-        mode = "rb"
 
-    with open(fs_path, mode) as f:
-        content = f.read()
-    return HTMLResponse(content=content, media_type=content_type)
+    if not fs_path.exists():
+        raise HTTPException(404, "not found")
+
+    return FileResponse(path=fs_path_str, media_type=content_type)
 
 # ---- Dev HTTPS bootstrap ----
 if __name__ == "__main__":
