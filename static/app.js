@@ -370,7 +370,7 @@ V.search.addEventListener('input', async () => {
     if (q.length === 8) {
         try {
             const s4 = q.slice(0, 4), k4 = q.slice(4, 8);
-            const res = await api(`/share/get/${encodeURIComponent(s4)}`, { method: 'POST' });
+            const res = await api(`/share/get/${encodeURIComponent(s4)}`, { method: 'GET' });
             // decrypt blob with k4
             const key = await crypto.subtle.importKey('raw', enc.encode(k4.padEnd(32, 'x')).slice(0, 32), 'AES-GCM', false, ['decrypt']);
             const blob = await aesDecrypt(key, res.blob);
