@@ -1,8 +1,9 @@
 import base64
 import traceback
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from starlette.middleware.sessions import SessionMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta, timezone
@@ -74,6 +75,13 @@ app.add_middleware(
     allow_origins=["*"], allow_credentials=True,
     allow_methods=["*"], allow_headers=["*"],
 )
+
+# ---- Admin config ----
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
+ADMIN_ENABLED = bool(ADMIN_PASSWORD)
+# Session secret for admin login state; ephemeral if not set explicitly
+SESSION_SECRET = os.getenv("ADMIN_SESSION_SECRET") or base64.urlsafe_b64encode(os.urandom(32)).decode()
+app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, same_site="lax")
 
 # ---- Schemas ----
 class ReserveReq(BaseModel):
@@ -279,6 +287,229 @@ def push_subscribe(req: PushSubscribeReq):
         _ensure_vapid_key(db)  # make sure key exists
         db.commit()
     return PushSubscribeResp(ok=True)
+
+# ---- Admin dashboard ----
+def _admin_enabled_or_404():
+    if not ADMIN_ENABLED:
+        raise HTTPException(404, "not found")
+
+def _admin_logged_in(req: Request) -> bool:
+    try:
+        return bool(req.session.get("admin_auth"))
+    except Exception:
+        return False
+
+def _html_page(title: str, body_html: str) -> HTMLResponse:
+    html = f"""
+    <!doctype html>
+    <html lang='en'>
+    <head>
+      <meta charset='utf-8'>
+      <meta name='viewport' content='width=device-width, initial-scale=1'>
+      <title>{title}</title>
+      <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; }}
+        header {{ display:flex; justify-content: space-between; align-items: center; margin-bottom:1rem; }}
+        table {{ border-collapse: collapse; width: 100%; }}
+        th, td {{ border: 1px solid #ddd; padding: 6px 8px; vertical-align: top; }}
+        th {{ background: #f5f5f5; text-align: left; }}
+        code, pre {{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }}
+        .muted {{ color:#666; }}
+        .danger {{ color:#b00020; }}
+        .btn {{ display:inline-block; padding: 6px 10px; border:1px solid #ccc; background:#fafafa; border-radius:6px; text-decoration:none; color:#111; }}
+        .btn.danger {{ border-color:#b00020; color:#b00020; }}
+        form.inline {{ display:inline; margin:0; padding:0; }}
+      </style>
+    </head>
+    <body>
+      <header>
+        <h1>{title}</h1>
+        <nav>
+          <form class="inline" method="post" action="/admin/logout">
+            <button class="btn" type="submit">Logout</button>
+          </form>
+        </nav>
+      </header>
+      {body_html}
+    </body>
+    </html>
+    """.strip()
+    return HTMLResponse(html)
+
+def _html_login(message: str = "") -> HTMLResponse:
+    msg = f"<p class='danger'>{message}</p>" if message else ""
+    html = f"""
+    <!doctype html>
+    <html lang='en'>
+    <head>
+      <meta charset='utf-8'>
+      <meta name='viewport' content='width=device-width, initial-scale=1'>
+      <title>Admin Login</title>
+      <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif; max-width: 480px; margin: 10vh auto; padding: 0 1rem; }}
+        label {{ display:block; margin: 0.5rem 0 0.25rem; }}
+        input[type=password] {{ width: 100%; padding: 8px; font-size: 16px; }}
+        button {{ margin-top: 1rem; padding: 8px 12px; }}
+      </style>
+    </head>
+    <body>
+      <h1>Admin</h1>
+      {msg}
+      <form method="post" action="/admin/login">
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" required autocomplete="current-password" />
+        <button type="submit">Sign in</button>
+      </form>
+    </body>
+    </html>
+    """.strip()
+    return HTMLResponse(html)
+
+from fastapi import Form
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin_home(request: Request):
+    _admin_enabled_or_404()
+    if not _admin_logged_in(request):
+        return _html_login()
+    # Overview: list tables and counts
+    with SessionLocal() as db:
+        tables = [
+            ("user_ids", UserId),
+            ("messages", Message),
+            ("share_slots", ShareSlot),
+            ("push_subscriptions", PushSubscription),
+            ("vapid_key", VapidKey),
+        ]
+        rows = []
+        for name, model in tables:
+            try:
+                count = db.execute(select(model)).scalars().all()
+                n = len(count)
+            except Exception:
+                n = 0
+            rows.append((name, n))
+    body = [
+        "<p class='muted'>Minimal admin dashboard. Data shown only after login. Use with care.</p>",
+        "<table>",
+        "<tr><th>Table</th><th>Rows</th><th>Actions</th></tr>",
+    ]
+    for name, n in rows:
+        body.append(
+            f"<tr><td><code>{name}</code></td><td>{n}</td><td>"
+            f"<a class='btn' href='/admin/table/{name}'>View</a>"
+            f"</td></tr>"
+        )
+    body.append("</table>")
+    return _html_page("Admin Dashboard", "\n".join(body))
+
+@app.post("/admin/login")
+def admin_login(request: Request, password: str = Form(...)):
+    _admin_enabled_or_404()
+    if password == ADMIN_PASSWORD:
+        request.session["admin_auth"] = True
+        return RedirectResponse(url="/admin", status_code=303)
+    return _html_login("Invalid password.")
+
+@app.post("/admin/logout")
+def admin_logout(request: Request):
+    _admin_enabled_or_404()
+    try:
+        request.session.clear()
+    except Exception:
+        request.session["admin_auth"] = False
+    return RedirectResponse(url="/admin", status_code=303)
+
+def _model_by_name(name: str):
+    mapping = {
+        "user_ids": UserId,
+        "messages": Message,
+        "share_slots": ShareSlot,
+        "push_subscriptions": PushSubscription,
+        "vapid_key": VapidKey,
+    }
+    return mapping.get(name)
+
+def _render_rows_table(name: str, model, items: list) -> str:
+    # Determine columns dynamically
+    cols = [c.name for c in model.__table__.columns]
+    head = "<tr>" + "".join(f"<th>{c}</th>" for c in cols) + "<th>Actions</th></tr>"
+    body = [head]
+    for row in items:
+        tds = []
+        for c in cols:
+            val = getattr(row, c)
+            if isinstance(val, dict):
+                try:
+                    val_str = "<pre>" + json.dumps(val, indent=2) + "</pre>"
+                except Exception:
+                    val_str = f"<code>{val}</code>"
+            else:
+                val_str = str(val)
+            tds.append(f"<td>{val_str}</td>")
+        # delete per-row form
+        tds.append(
+            "<td>"
+            f"<form class='inline' method='post' action='/admin/table/{name}/delete-row'>"
+            f"<input type='hidden' name='id' value='{getattr(row, 'id', '')}'/>"
+            f"<button class='btn danger' type='submit' onclick=\"return confirm('Delete row {getattr(row, 'id', '')}?')\">Delete</button>"
+            "</form>"
+            "</td>"
+        )
+        body.append("<tr>" + "".join(tds) + "</tr>")
+    return "<table>" + "\n".join(body) + "</table>"
+
+@app.get("/admin/table/{name}", response_class=HTMLResponse)
+def admin_table(request: Request, name: str, limit: int = 200):
+    _admin_enabled_or_404()
+    if not _admin_logged_in(request):
+        return _html_login()
+    model = _model_by_name(name)
+    if not model:
+        raise HTTPException(404, "unknown table")
+    limit = max(1, min(int(limit or 200), 1000))
+    with SessionLocal() as db:
+        items = db.execute(select(model).order_by(model.id.asc()).limit(limit)).scalars().all()
+    rows_html = _render_rows_table(name, model, items)
+    controls = (
+        f"<p><a class='btn' href='/admin'>&larr; Back</a> "
+        f"<form class='inline' method='post' action='/admin/table/{name}/clear'>"
+        f"<button class='btn danger' type='submit' onclick=\"return confirm('Clear ALL rows in {name}?')\">Clear table</button>"
+        f"</form></p>"
+    )
+    return _html_page(f"Admin — {name}", controls + rows_html)
+
+from fastapi import status
+
+@app.post("/admin/table/{name}/clear")
+def admin_clear_table(request: Request, name: str):
+    _admin_enabled_or_404()
+    if not _admin_logged_in(request):
+        return _html_login()
+    model = _model_by_name(name)
+    if not model:
+        raise HTTPException(404, "unknown table")
+    with SessionLocal() as db:
+        db.execute(delete(model))
+        db.commit()
+    return RedirectResponse(url=f"/admin/table/{name}", status_code=status.HTTP_303_SEE_OTHER)
+
+@app.post("/admin/table/{name}/delete-row")
+def admin_delete_row(request: Request, name: str, id: int = Form(...)):
+    _admin_enabled_or_404()
+    if not _admin_logged_in(request):
+        return _html_login()
+    model = _model_by_name(name)
+    if not model:
+        raise HTTPException(404, "unknown table")
+    with SessionLocal() as db:
+        try:
+            db.execute(delete(model).where(model.id == id))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise HTTPException(400, "failed to delete row")
+    return RedirectResponse(url=f"/admin/table/{name}", status_code=status.HTTP_303_SEE_OTHER)
 
 # ---- Static files (dev) ----
 # Serve from "static" (renamed from static_old) to preserve original design

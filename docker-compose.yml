@@ -10,6 +10,10 @@ services:
       - SSL_MODE=adhoc
       - HOST=0.0.0.0
       - PORT=8000
+      # Admin dashboard: set ADMIN_PASSWORD to enable /admin. Leave unset to disable admin.
+      # - ADMIN_PASSWORD=change-me
+      # Optional: set ADMIN_SESSION_SECRET for persistent admin sessions across restarts
+      # - ADMIN_SESSION_SECRET=very-long-random-string
     volumes:
       - swc_data:/data   # runtime files like chat.db and .adhoc_ssl persist here
     restart: unless-stopped

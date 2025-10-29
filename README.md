@@ -66,3 +66,30 @@ Environment overrides:
 Data persistence:
 
 - The SQLite database `chat.db` and ad hoc SSL artifacts are stored under the named volume `swc_data` at `/data` inside the container.
+
+## Admin dashboard (/admin)
+
+A minimal, password-gated admin dashboard is available at `/admin` to inspect and manage data tables. It's disabled by default.
+
+Enable it by setting an admin password via environment variable:
+
+```sh
+# example (compose):
+# in docker-compose.yml under services.secure-web-chat.environment
+ADMIN_PASSWORD=change-me
+```
+
+Optional settings:
+
+- `ADMIN_SESSION_SECRET`: secret used to sign the admin session cookie. If not set, a random, ephemeral secret is generated on startup (logins will not persist across restarts).
+
+Capabilities:
+
+- Login form at `/admin` (only shown when `ADMIN_PASSWORD` is set)
+- View table contents of `user_ids`, `messages`, `share_slots`, `push_subscriptions`, and `vapid_key`
+- Delete individual rows or clear entire tables
+
+Notes and safety:
+
+- This is a simple HTML-only dashboard that uses standard GET/POST; there is no CSRF protection and it is intended for trusted environments.
+- Protect the endpoint at the network layer in production (e.g., firewall or reverse proxy with IP allowlists) and use HTTPS.
