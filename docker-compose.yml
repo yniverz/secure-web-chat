@@ -14,6 +14,8 @@ services:
       # - ADMIN_PASSWORD=change-me
       # Optional: set ADMIN_SESSION_SECRET for persistent admin sessions across restarts
       # - ADMIN_SESSION_SECRET=very-long-random-string
+    env_file:
+      - stack.env
     volumes:
       - swc_data:/data   # runtime files like chat.db and .adhoc_ssl persist here
     restart: unless-stopped
