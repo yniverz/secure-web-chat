@@ -5,3 +5,4 @@ pydantic
 pywebpush
 cryptography
 itsdangerous
+python-multipart
