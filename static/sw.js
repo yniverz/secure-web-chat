@@ -88,6 +88,11 @@ self.addEventListener('message', (event) => {
       const id = await idbGet('active_id');
       if (id) await idbDel('privJwk:' + id);
       await idbDel('active_id');
+    } else if (data.type === 'setContacts' && Array.isArray(data.contacts)) {
+      // data.contacts: [{ id_hash, name }]
+      for (const c of data.contacts) {
+        if (c && c.id_hash) await idbPut('name:' + c.id_hash, c.name || '');
+      }
     }
   })();
 });
@@ -124,7 +129,7 @@ async function anyClientVisible() {
     if (typeof c.focused === 'boolean' && c.focused) return true;
     if (c.visibilityState && c.visibilityState === 'visible') return true;
   }
-  return cl.length > 0 ? false : false;
+  return false;
 }
 
 // Push handler: if app visible, ignore; otherwise try to decrypt and show message text.
@@ -139,6 +144,7 @@ self.addEventListener('push', (event) => {
       let title = 'Secure Chat';
       let body = 'You received a message';
       let tag = 'secure-chat-generic';
+      let fromId = null;
 
       if (data && data.kind === 'message' && data.payload) {
         try {
@@ -146,10 +152,25 @@ self.addEventListener('push', (event) => {
           const privJwk = activeId ? await idbGet('privJwk:' + activeId) : null;
           if (privJwk && data.payload.type === 'msg' && data.payload.content) {
             const msgObj = await hybridDecryptRSAOaepSW(privJwk, data.payload.content);
-            // msgObj: { text, ts, from }
+            // msgObj: { id?, text, ts, from }
             body = String(msgObj.text || body);
-            title = 'New message';
+            fromId = msgObj.from || null;
+            // Lookup sender name if we have it
+            if (fromId) {
+              const nm = await idbGet('name:' + fromId);
+              title = nm ? nm : 'New message';
+            } else {
+              title = 'New message';
+            }
             tag = 'secure-chat-msg';
+            // If app is visible, forward to page instead of showing notification
+            if (await anyClientVisible()) {
+              const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+              for (const client of clients) {
+                client.postMessage({ type: 'incomingMessage', message: msgObj });
+              }
+              return; // skip notification
+            }
           } else if (privJwk && data.payload.type === 'intro' && data.payload.content) {
             const intro = await hybridDecryptRSAOaepSW(privJwk, data.payload.content);
             title = 'New contact';

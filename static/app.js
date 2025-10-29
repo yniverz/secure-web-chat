@@ -109,6 +109,7 @@ let contacts = [];  // [{name,id_hash, pubJwk, notifUrl?, notifToken?}]
 let messagesByContact = new Map();
 let activeContact = null;
 let pollAbort = null;
+let seenMsgIds = new Set(); // for dedup across push vs poll
 
 /* ========================= PUSH NOTIFICATIONS (reintroduced minimal) =========================
    Flow:
@@ -361,6 +362,7 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
     await startPolling();
     renderContacts(contacts);
     initNotificationsUI();
+    sendContactsToServiceWorker().catch(() => {});
     show('contacts');
 });
 
@@ -401,6 +403,7 @@ V.search.addEventListener('input', async () => {
             }
             await saveEncrypted(me.userKey, LS_KEYS.enc_contacts, contacts);
             renderContacts(contacts);
+            sendContactsToServiceWorker().catch(() => {});
             showToast('Contact imported!');
             V.search.value = '';
             // Proactively introduce ourselves so the other peer adds us too
@@ -467,7 +470,7 @@ document.getElementById('composer-form').addEventListener('submit', async (e) =>
 
     const c = contacts.find(x => x.id_hash === activeContact);
     try {
-        const pack = await hybridEncryptRSAOaep(c.pubJwk, { text, ts: msg.ts, from: me.id_hash });
+        const pack = await hybridEncryptRSAOaep(c.pubJwk, { id: msg.id, text, ts: msg.ts, from: me.id_hash });
         await api('/messages/push', { method: 'POST', body: JSON.stringify({ to_id_hash: c.id_hash, payload: { type: 'msg', content: pack } }) });
         // notifications removed: no external notifier hook
     } catch (err) {
@@ -492,6 +495,10 @@ async function startPolling() {
                     if (item.payload?.type === 'msg') {
                         try {
                             const msgObj = await hybridDecryptRSAOaep(me.privJwk, item.payload.content);
+                            // Dedup using sender-provided id when available
+                            const dedupId = msgObj.id || `srv-${item.id}`;
+                            if (seenMsgIds.has(dedupId)) continue;
+                            seenMsgIds.add(dedupId);
                             const fromId = msgObj.from;
 
                             // ensure there's a contact entry
@@ -501,10 +508,14 @@ async function startPolling() {
                                 contacts.push(c);
                                 await saveEncrypted(me.userKey, LS_KEYS.enc_contacts, contacts);
                                 renderContacts(contacts);
+                                sendContactsToServiceWorker().catch(() => {});
                             }
 
                             const arr = messagesByContact.get(fromId) || [];
-                            arr.push({ id: item.id, from: 'them', text: msgObj.text, ts: msgObj.ts });
+                            // Prevent duplicates within the same array by id
+                            if (!arr.some(m => m.id === dedupId)) {
+                                arr.push({ id: dedupId, from: 'them', text: msgObj.text, ts: msgObj.ts });
+                            }
                             messagesByContact.set(fromId, arr);
 
                             c._last = msgObj.text;
@@ -536,6 +547,7 @@ async function startPolling() {
                             }
                             await saveEncrypted(me.userKey, LS_KEYS.enc_contacts, contacts);
                             renderContacts(contacts);
+                            sendContactsToServiceWorker().catch(() => {});
                             showToast(`${c.name} added you`);
                         } catch (e) {
                             console.error('Failed to process intro', e, item);
@@ -596,4 +608,53 @@ async function sendPrivKeyToServiceWorker() {
         if (!me?.privJwk || !me?.id_hash) return;
         await postMessageToSW({ type: 'storePrivKey', id_hash: me.id_hash, privJwk: me.privJwk });
     } catch {}
+}
+
+function contactNamePairs() {
+    try { return (contacts || []).map(c => ({ id_hash: c.id_hash, name: c.name || '' })); } catch { return []; }
+}
+
+async function sendContactsToServiceWorker() {
+    try {
+        await postMessageToSW({ type: 'setContacts', contacts: contactNamePairs() });
+    } catch {}
+}
+
+// Receive decrypted push messages from SW when app is visible
+if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.addEventListener('message', (event) => {
+        const data = event.data || {};
+        if (data.type === 'incomingMessage' && data.message) {
+            const msgObj = data.message; // { id?, text, ts, from }
+            const fromId = msgObj.from;
+            const dedupId = msgObj.id || `push-${msgObj.ts}-${fromId}`;
+            if (seenMsgIds.has(dedupId)) return;
+            seenMsgIds.add(dedupId);
+
+            // ensure contact exists
+            let c = contacts.find(x => x.id_hash === fromId);
+            if (!c) {
+                c = { name: fromId.slice(0, 6), id_hash: fromId, pubJwk: null };
+                contacts.push(c);
+                saveEncrypted(me.userKey, LS_KEYS.enc_contacts, contacts);
+                renderContacts(contacts);
+                sendContactsToServiceWorker().catch(() => {});
+            }
+
+            const arr = messagesByContact.get(fromId) || [];
+            if (!arr.some(m => m.id === dedupId)) {
+                arr.push({ id: dedupId, from: 'them', text: msgObj.text, ts: msgObj.ts });
+            }
+            messagesByContact.set(fromId, arr);
+
+            c._last = msgObj.text;
+            if (activeContact !== fromId) {
+                c._unread = (c._unread || 0) + 1;
+                renderContacts(contacts);
+                showToast(`New message from ${c.name}`);
+            } else {
+                renderMessages(fromId);
+            }
+        }
+    });
 }
