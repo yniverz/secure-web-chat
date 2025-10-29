@@ -479,6 +479,58 @@ document.getElementById('composer-form').addEventListener('submit', async (e) =>
     }
 });
 
+// Enter-to-send behavior: desktop or hardware keyboard → Enter sends; mobile touch → Enter newline.
+const MSG_INPUT = document.getElementById('message-input');
+
+function isLikelyMobile() {
+    const ua = navigator.userAgent || '';
+    const m = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile/i.test(ua);
+    return m;
+}
+
+function hasFinePointer() {
+    try { return window.matchMedia && window.matchMedia('(pointer:fine)').matches; } catch { return false; }
+}
+
+function hasHover() {
+    try { return window.matchMedia && window.matchMedia('(hover:hover)').matches; } catch { return false; }
+}
+
+function enterSendsEnabled() {
+    // Prefer Enter-to-send when we likely have a hardware keyboard (desktop-like signals)
+    // Heuristic: fine pointer or hover, or clearly non-mobile UA
+    const desktopSignals = hasFinePointer() || hasHover() || !isLikelyMobile();
+    return !!desktopSignals;
+}
+
+function updateEnterKeyHint() {
+    try {
+        if (MSG_INPUT && 'enterKeyHint' in MSG_INPUT) {
+            MSG_INPUT.enterKeyHint = enterSendsEnabled() ? 'send' : 'enter';
+        }
+    } catch {}
+}
+
+// Keyboard handling for textarea
+MSG_INPUT.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    if (e.isComposing) return; // IME composing
+    if (e.shiftKey) return;    // allow Shift+Enter newline everywhere
+
+    const shouldSend = enterSendsEnabled() || e.ctrlKey || e.metaKey; // Ctrl/Cmd+Enter always sends
+    if (shouldSend) {
+        e.preventDefault(); // avoid newline
+        document.getElementById('composer-form').dispatchEvent(new Event('submit', { cancelable: true }));
+    } else {
+        // Mobile: allow newline; do nothing
+    }
+});
+
+// Keep hint updated on load and when environment may change
+updateEnterKeyHint();
+window.addEventListener('resize', updateEnterKeyHint);
+document.addEventListener('visibilitychange', updateEnterKeyHint);
+
 document.getElementById('back-btn').addEventListener('click', () => {
     activeContact = null;
     show('contacts');
