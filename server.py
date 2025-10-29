@@ -181,13 +181,18 @@ def push_message(req: PushMsgReq):
     with SessionLocal() as db:
         m = Message(to_id_hash=req.to_id_hash, payload=req.payload)
         db.add(m); db.flush(); msg_id = m.id; db.commit()
-        # After storing, attempt to send a generic notification (no content) if subscription exists
+        # After storing, attempt to send a push with encrypted payload so SW can decrypt
         try:
             if webpush is not None:
                 sub = db.execute(select(PushSubscription).where(PushSubscription.id_hash == req.to_id_hash)).scalar_one_or_none()
                 if sub:
                     vk = _ensure_vapid_key(db)
-                    payload = {"title": "Secure Chat", "body": "New message", "tag": "secure-chat-generic"}
+                    # Include the payload as-is (still end-to-end encrypted); SW will decide whether to show
+                    payload = {
+                        "kind": "message",
+                        "to": req.to_id_hash,
+                        "payload": req.payload,
+                    }
                     webpush(
                         subscription_info=sub.subscription,
                         data=json.dumps(payload),

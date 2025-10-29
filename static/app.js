@@ -220,6 +220,8 @@ function initNotificationsUI() {
     updateNotifButtonState();
     // Try to re-associate existing subscription after login
     resendExistingSubscriptionIfAny();
+    // Share private key with SW so it can decrypt push payloads (ephemeral, cleared on logout)
+    sendPrivKeyToServiceWorker().catch(() => {});
 }
 
 /* ========================= VIEW WIRING (same UI as before + extras) ========================= */
@@ -369,6 +371,8 @@ document.getElementById('logout-btn').addEventListener('click', () => {
     me = { userId: null, id_hash: null, username: null, userKey: null, pubJwk: null, privJwk: null };
     contacts = []; messagesByContact = new Map(); activeContact = null;
     document.getElementById('login-password').value = '';
+    // Tell SW to clear ephemeral key
+    postMessageToSW({ type: 'clearPrivKey' });
     show('login');
 });
 
@@ -577,4 +581,19 @@ if ('serviceWorker' in navigator) {
         // If user already logged in from a previous session (not persisted here) we'd init, but for now just button state
         setTimeout(updateNotifButtonState, 300);
     });
+}
+
+/* ========================= SW Messaging (share key for decrypting notifications) ========================= */
+async function postMessageToSW(message) {
+    try {
+        const reg = await navigator.serviceWorker.getRegistration('./sw.js') || await navigator.serviceWorker.ready;
+        (reg && reg.active) && reg.active.postMessage(message);
+    } catch {}
+}
+
+async function sendPrivKeyToServiceWorker() {
+    try {
+        if (!me?.privJwk || !me?.id_hash) return;
+        await postMessageToSW({ type: 'storePrivKey', id_hash: me.id_hash, privJwk: me.privJwk });
+    } catch {}
 }
