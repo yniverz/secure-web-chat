@@ -2,11 +2,11 @@ import base64
 import traceback
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta, timezone
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, JSON, Text, select, delete
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, JSON, select, delete
 from sqlalchemy.orm import declarative_base, sessionmaker
 import secrets
 import os
@@ -20,7 +20,7 @@ except Exception:  # pragma: no cover
     webpush = None
     class WebPushException(Exception):
         pass
-    
+
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import serialization
 
@@ -50,8 +50,6 @@ class ShareSlot(Base):
     blob = Column(JSON, nullable=False)  # AES-GCM {iv, ct}
     expires_at = Column(DateTime, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
-
-Base.metadata.create_all(engine)
 
 class VapidKey(Base):
     __tablename__ = "vapid_key"
@@ -102,6 +100,7 @@ class PollResp(BaseModel):
 class ShareCreateReq(BaseModel):
     ttl_seconds: int
     blob: Dict[str, Any]
+    prefer_code4: Optional[str] = None  # optional preferred 4-char code from client
 
 class ShareCreateResp(BaseModel):
     code4: str
@@ -142,17 +141,16 @@ def vapid_private_key_b64url(priv: ec.EllipticCurvePrivateKey) -> str:
     # 32-byte big-endian scalar (the secret number d)
     d_bytes = priv.private_numbers().private_value.to_bytes(32, 'big')
     return base64.urlsafe_b64encode(d_bytes).rstrip(b"=").decode()
-        
+
 
 def _ensure_vapid_key(db):
     vk = db.execute(select(VapidKey)).scalar_one_or_none()
     if vk:
         return vk
-    
     # Generate new P-256 keypair
     try:
         priv_obj = ec.generate_private_key(ec.SECP256R1())
-    except TypeError:  # very old cryptography fallback
+    except TypeError:  # pragma: no cover
         from cryptography.hazmat.backends import default_backend  # pragma: no cover
         priv_obj = ec.generate_private_key(ec.SECP256R1(), default_backend())
 
@@ -189,7 +187,7 @@ def push_message(req: PushMsgReq):
                 sub = db.execute(select(PushSubscription).where(PushSubscription.id_hash == req.to_id_hash)).scalar_one_or_none()
                 if sub:
                     vk = _ensure_vapid_key(db)
-                    payload = {"title": "Notification", "body": "You received a message", "tag": "secure-chat-generic"}
+                    payload = {"title": "Secure Chat", "body": "New message", "tag": "secure-chat-generic"}
                     webpush(
                         subscription_info=sub.subscription,
                         data=json.dumps(payload),
@@ -221,11 +219,16 @@ def poll_messages(req: PollReq):
 def share_create(req: ShareCreateReq):
     ttl = max(10, min(req.ttl_seconds, 60 * 60 * 24))  # 10s .. 24h
     exp = datetime.now(timezone.utc) + timedelta(seconds=ttl)
-    code = gen_code4()
+    # Try to honor client-provided prefer_code4 when available and free
+    preferred = (req.prefer_code4 or "").strip().upper()[:4]
     with SessionLocal() as db:
-        # ensure unique code
-        while db.execute(select(ShareSlot).where(ShareSlot.code4 == code)).scalar_one_or_none() is not None:
+        code = None
+        if preferred and not db.execute(select(ShareSlot).where(ShareSlot.code4 == preferred)).scalar_one_or_none():
+            code = preferred
+        else:
             code = gen_code4()
+            while db.execute(select(ShareSlot).where(ShareSlot.code4 == code)).scalar_one_or_none() is not None:
+                code = gen_code4()
         slot = ShareSlot(code4=code, blob=req.blob, expires_at=exp)
         db.add(slot)
         db.commit()
@@ -273,31 +276,28 @@ def push_subscribe(req: PushSubscribeReq):
     return PushSubscribeResp(ok=True)
 
 # ---- Static files (dev) ----
+# Serve from "static" (renamed from static_old) to preserve original design
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 @app.get("/{path:path}")
 def root(path: str = ""):
-    available = [
-        "",
-        "index.html",
-        "app.js",
-        "styles.css",
-        "manifest.webmanifest",
-        "sw.js",
-        "icons/icon-192.png",
-        "icons/icon-512.png",
-        "icons/apple-touch-icon-180.png",
-    ]
-
-    if path not in available:
-        raise HTTPException(404, "not found")
-
-    if path == "":
+    # default document
+    if path in ("", "/"):
         path = "index.html"
 
-    fs_path = (STATIC_DIR / path)
-    fs_path_str = str(fs_path)
+    # resolve against STATIC_DIR and prevent path traversal
+    fs_path = (STATIC_DIR / path).resolve()
+    try:
+        STATIC_DIR_RESOLVED = STATIC_DIR.resolve()
+    except Exception:
+        STATIC_DIR_RESOLVED = STATIC_DIR
+    if not str(fs_path).startswith(str(STATIC_DIR_RESOLVED)):
+        raise HTTPException(404, "not found")
 
+    if not fs_path.exists() or not fs_path.is_file():
+        raise HTTPException(404, "not found")
+
+    fs_path_str = str(fs_path)
     if fs_path_str.endswith(".html"):
         content_type = "text/html"
     elif fs_path_str.endswith(".js"):
@@ -308,11 +308,14 @@ def root(path: str = ""):
         content_type = "application/manifest+json"
     elif fs_path_str.endswith(".png"):
         content_type = "image/png"
+    elif fs_path_str.endswith(".svg"):
+        content_type = "image/svg+xml"
+    elif fs_path_str.endswith(".ico"):
+        content_type = "image/x-icon"
+    elif fs_path_str.endswith(".json"):
+        content_type = "application/json"
     else:
         content_type = "application/octet-stream"
-
-    if not fs_path.exists():
-        raise HTTPException(404, "not found")
 
     return FileResponse(path=fs_path_str, media_type=content_type)
 
@@ -424,10 +427,10 @@ IP.2 = ::1
             print(f"[WARN] Failed to generate ad hoc cert via openssl: {e}")
             return None, None
 
-    def _cert_is_currently_valid(cert_path: Path) -> bool:
+    def _cert_valid(p: Path) -> bool:
         try:
             res = subprocess.run(
-                ["openssl", "x509", "-checkend", "0", "-noout", "in", str(cert_path)],
+                ["openssl", "x509", "-checkend", "0", "-noout", "-in", str(p)],
                 capture_output=True,
             )
             return res.returncode == 0
@@ -448,15 +451,6 @@ IP.2 = ::1
         else:
             cert_path = store_dir / "cert.pem"
             key_path = store_dir / "key.pem"
-            def _cert_valid(p: Path) -> bool:
-                try:
-                    res = subprocess.run(
-                        ["openssl", "x509", "-checkend", "0", "-noout", "-in", str(p)],
-                        capture_output=True,
-                    )
-                    return res.returncode == 0
-                except Exception:
-                    return False
             have_valid = cert_path.exists() and key_path.exists() and _cert_valid(cert_path)
             if not have_valid:
                 tmp_cert, tmp_key = _gen_adhoc_cert(store_dir)
