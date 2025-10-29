@@ -446,7 +446,31 @@ document.getElementById('rename-contact').addEventListener('click', async () => 
         await saveEncrypted(me.userKey, LS_KEYS.enc_contacts, contacts);
         V.chatTitle.textContent = c.name;
         renderContacts(contacts);
+        sendContactsToServiceWorker().catch(() => {});
     }
+});
+
+// Delete contact
+document.getElementById('delete-contact').addEventListener('click', async () => {
+    if (!activeContact) return;
+    const c = contacts.find(x => x.id_hash === activeContact);
+    const display = c?.name || activeContact.slice(0, 6);
+    const confirmed = confirm(`Delete contact “${display}”? This removes them and local messages on this device.`);
+    if (!confirmed) return;
+
+    // Remove from contacts
+    contacts = contacts.filter(x => x.id_hash !== activeContact);
+    await saveEncrypted(me.userKey, LS_KEYS.enc_contacts, contacts);
+    // Remove local messages
+    messagesByContact.delete(activeContact);
+    // Update UI
+    activeContact = null;
+    renderContacts(contacts);
+    V.chatTitle.textContent = 'Chat';
+    V.msgList.innerHTML = '';
+    show('contacts');
+    sendContactsToServiceWorker().catch(() => {});
+    showToast('Contact deleted');
 });
 
 // 6) Open chat
