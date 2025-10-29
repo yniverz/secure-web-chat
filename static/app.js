@@ -110,6 +110,8 @@ let messagesByContact = new Map();
 let activeContact = null;
 let pollAbort = null;
 let seenMsgIds = new Set(); // for dedup across push vs poll
+let shareModalOpen = false;
+let shareModalCloseTimer = null;
 
 /* ========================= PUSH NOTIFICATIONS (reintroduced minimal) =========================
    Flow:
@@ -431,8 +433,7 @@ document.getElementById('share-me').addEventListener('click', async () => {
     const encBlob = await aesEncrypt(aesKey, blob);
     const res = await api('/share/create', { method: 'POST', body: JSON.stringify({ prefer_code4: s4, blob: encBlob, ttl_seconds: 3600 }) });
     const code = res.code4 + k4;
-    navigator.clipboard?.writeText(code).catch(() => { });
-    alert(`Share this 8-char code:\n\n${code}\n\nIt expires in ~1 hour.`);
+    openShareModal(code);
 });
 
 // 5) Rename contact
@@ -549,6 +550,8 @@ async function startPolling() {
                             renderContacts(contacts);
                             sendContactsToServiceWorker().catch(() => {});
                             showToast(`${c.name} added you`);
+                            // Auto-close share modal if open
+                            if (shareModalOpen) closeShareModal('contact-added');
                         } catch (e) {
                             console.error('Failed to process intro', e, item);
                         }
@@ -655,6 +658,50 @@ if ('serviceWorker' in navigator) {
             } else {
                 renderMessages(fromId);
             }
+            // If share modal is open, it likely means we are onboarding someone; keep it open here
         }
     });
+}
+
+/* ========================= Share Modal UI ========================= */
+function shareModalEls() {
+    return {
+        root: document.getElementById('share-modal'),
+        code: document.getElementById('share-code'),
+        copy: document.getElementById('share-copy'),
+        close: document.getElementById('share-close'),
+        status: document.getElementById('share-status'),
+    };
+}
+
+function openShareModal(code) {
+    const els = shareModalEls();
+    if (!els.root) return;
+    els.code.textContent = code;
+    els.status.textContent = 'Copied to clipboard';
+    navigator.clipboard?.writeText(code).catch(() => { els.status.textContent = 'Copy failed — tap Copy'; });
+    els.root.classList.remove('hidden');
+    shareModalOpen = true;
+    // Wire events once
+    if (!els.root._wired) {
+        els.root._wired = true;
+        els.copy.addEventListener('click', () => {
+            const txt = els.code.textContent || '';
+            navigator.clipboard?.writeText(txt).then(() => {
+                els.status.textContent = 'Copied!';
+            }).catch(() => {
+                els.status.textContent = 'Copy failed';
+            });
+        });
+        els.close.addEventListener('click', () => closeShareModal('manual'));
+        els.root.querySelector('.modal-backdrop')?.addEventListener('click', () => closeShareModal('backdrop'));
+    }
+}
+
+function closeShareModal(reason = '') {
+    const els = shareModalEls();
+    if (!els.root) return;
+    els.root.classList.add('hidden');
+    shareModalOpen = false;
+    if (shareModalCloseTimer) { clearTimeout(shareModalCloseTimer); shareModalCloseTimer = null; }
 }

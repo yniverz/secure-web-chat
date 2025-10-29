@@ -78,6 +78,25 @@
     </section>
   </div>
 
+  <!-- Share Modal -->
+  <div id="share-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="share-title">
+    <div class="modal-backdrop" data-close="1"></div>
+    <div class="modal-card">
+      <div class="modal-header">
+        <div class="modal-title" id="share-title">Share your code</div>
+        <button class="iconbtn" id="share-close" aria-label="Close">✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="muted" style="margin-top:0">Share this 8-char code with your contact. It expires in ~1 hour.</p>
+        <div class="share-code" id="share-code"></div>
+        <div class="modal-actions">
+          <button class="btn" id="share-copy">Copy code</button>
+        </div>
+        <div class="muted" id="share-status" style="font-size:12px;margin-top:8px"></div>
+      </div>
+    </div>
+  </div>
+
   <div class="toast" id="toast"></div>
 
   <script src="app.js"></script>

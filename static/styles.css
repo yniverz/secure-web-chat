@@ -255,3 +255,44 @@ textarea.input {
 @media (min-width: 480px) {
     .header { padding: calc(8px + var(--safe-top)) 16px 8px 12px; }
 }
+
+/* Modal */
+.modal.hidden { display: none }
+.modal {
+    position: fixed;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    z-index: 1000;
+}
+.modal-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(0,0,0,.45);
+}
+.modal-card {
+    position: relative;
+    width: calc(100% - 24px);
+    max-width: 420px;
+    background: var(--card);
+    border: 1px solid #1e2433;
+    border-radius: 16px;
+    box-shadow: 0 8px 40px rgba(0,0,0,.45);
+    padding: 14px;
+}
+.modal-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px }
+.modal-title { font-weight: 800; font-size: 16px }
+.modal-body { padding: 8px 4px 4px }
+.modal-actions { display: flex; gap: 8px; margin-top: 10px }
+.share-code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    font-weight: 800;
+    font-size: 28px;
+    background: #101422;
+    border: 1px dashed #2a3247;
+    color: #ffffff;
+    border-radius: 12px;
+    padding: 14px 16px;
+    text-align: center;
+    letter-spacing: 2px;
+}
