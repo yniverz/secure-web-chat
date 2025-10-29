@@ -711,6 +711,11 @@ if ('serviceWorker' in navigator) {
             seenMsgIds.add(dedupId);
 
             // ensure contact exists
+        if (data.type === 'assetsRefreshed') {
+            showToast(data.ok ? 'App files refreshed' : 'Refresh failed (offline?)');
+            // Reload to take effect
+            setTimeout(() => location.reload(), 150);
+        }
             let c = contacts.find(x => x.id_hash === fromId);
             if (!c) {
                 c = { name: fromId.slice(0, 6), id_hash: fromId, pubJwk: null };
@@ -781,3 +786,16 @@ function closeShareModal(reason = '') {
     shareModalOpen = false;
     if (shareModalCloseTimer) { clearTimeout(shareModalCloseTimer); shareModalCloseTimer = null; }
 }
+
+/* ========================= Manual refresh of cached assets ========================= */
+document.getElementById('reload-app')?.addEventListener('click', async (e) => {
+    e.preventDefault();
+    try {
+        showToast('Refreshing app…');
+        await postMessageToSW({ type: 'refreshAssets' });
+        // In case the SW cannot message back, fallback reload shortly
+        setTimeout(() => { try { location.reload(); } catch {} }, 1200);
+    } catch {
+        location.reload();
+    }
+});

@@ -93,6 +93,21 @@ self.addEventListener('message', (event) => {
       for (const c of data.contacts) {
         if (c && c.id_hash) await idbPut('name:' + c.id_hash, c.name || '');
       }
+    } else if (data.type === 'refreshAssets') {
+      // Clear all caches and precache ASSETS again, then notify clients
+      let ok = true;
+      try {
+        const keys = await caches.keys();
+        await Promise.all(keys.map(k => caches.delete(k)));
+        const cache = await caches.open(CACHE);
+        await cache.addAll(ASSETS);
+      } catch (e) {
+        ok = false;
+      }
+      const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+      for (const client of clients) {
+        client.postMessage({ type: 'assetsRefreshed', ok });
+      }
     }
   })();
 });
