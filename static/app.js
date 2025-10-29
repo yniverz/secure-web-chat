@@ -253,15 +253,58 @@ function show(view) {
     }
 }
 function renderContacts(list) {
-    V.list.innerHTML = '';
-    if (!list.length) { V.list.innerHTML = '<div class="center muted" style="padding:24px">No contacts yet</div>'; return; }
+    // Clear list safely
+    V.list.textContent = '';
+    if (!list.length) {
+        const empty = document.createElement('div');
+        empty.className = 'center muted';
+        empty.style.padding = '24px';
+        empty.textContent = 'No contacts yet';
+        V.list.appendChild(empty);
+        return;
+    }
     list.forEach(c => {
-        const row = document.createElement('div'); row.className = 'contact';
-        row.innerHTML = `<div class="avatar">${initials(c.name)}</div>
-  <div class="meta">
-    <div><div class="name">${c.name}</div><div class="last">${(c._last || '')}</div></div>
-    <div style="text-align:right"><div class="muted" style="font-size:12px"></div>${c._unread ? `<div class="badge">${c._unread}</div>` : ''}</div>
-  </div>`;
+        const row = document.createElement('div');
+        row.className = 'contact';
+
+        const avatar = document.createElement('div');
+        avatar.className = 'avatar';
+        avatar.textContent = initials(c.name);
+
+        const meta = document.createElement('div');
+        meta.className = 'meta';
+
+        const left = document.createElement('div');
+        const nameWrap = document.createElement('div');
+        const nameEl = document.createElement('div');
+        nameEl.className = 'name';
+        nameEl.textContent = c.name || '';
+        const lastEl = document.createElement('div');
+        lastEl.className = 'last';
+        lastEl.textContent = c._last || '';
+        nameWrap.appendChild(nameEl);
+        nameWrap.appendChild(lastEl);
+        left.appendChild(nameWrap);
+
+        const right = document.createElement('div');
+        right.style.textAlign = 'right';
+        const muted = document.createElement('div');
+        muted.className = 'muted';
+        muted.style.fontSize = '12px';
+        right.appendChild(muted);
+        if (c._unread) {
+            const badge = document.createElement('div');
+            badge.className = 'badge';
+            badge.textContent = String(c._unread);
+            right.appendChild(badge);
+        }
+
+        meta.appendChild(left);
+        meta.appendChild(right);
+
+        row.appendChild(avatar);
+        row.appendChild(meta);
+
         row.addEventListener('click', () => openChat(c.id_hash));
         V.list.appendChild(row);
     });

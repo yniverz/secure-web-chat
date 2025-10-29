@@ -4,6 +4,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.middleware.httpsredirect import HTTPSRedirectMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta, timezone
@@ -70,6 +71,25 @@ Base.metadata.create_all(engine)
 
 # ---- App ----
 app = FastAPI()
+
+# Enforce HTTPS by redirecting HTTP → HTTPS.
+# Built-in HTTPSRedirectMiddleware doesn't consider X-Forwarded-Proto, so add a tiny wrapper that does.
+from starlette.middleware.base import BaseHTTPMiddleware
+from urllib.parse import urlsplit, urlunsplit
+
+class HttpsOrForwardedRedirectMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        scheme = request.url.scheme
+        xf_proto = request.headers.get('x-forwarded-proto', '').split(',')[0].strip().lower()
+        if scheme != 'https' and xf_proto != 'https':
+            # Build https URL preserving host, path, query
+            url = request.url
+            parts = urlsplit(str(url))
+            https_url = urlunsplit(('https', parts.netloc, parts.path, parts.query, parts.fragment))
+            return RedirectResponse(url=https_url, status_code=307)
+        return await call_next(request)
+
+app.add_middleware(HttpsOrForwardedRedirectMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
@@ -81,7 +101,56 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
 ADMIN_ENABLED = bool(ADMIN_PASSWORD)
 # Session secret for admin login state; ephemeral if not set explicitly
 SESSION_SECRET = os.getenv("ADMIN_SESSION_SECRET") or base64.urlsafe_b64encode(os.urandom(32)).decode()
-app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, same_site="lax")
+app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, same_site="strict", https_only=True)
+
+# --- Security headers (CSP, HSTS, etc.) ---
+from starlette.types import ASGIApp, Receive, Scope, Send
+
+class SecurityHeadersMiddleware:
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_wrapper(message):
+            if message.get("type") == "http.response.start":
+                headers = message.setdefault("headers", [])
+                def set_header(name: str, value: str):
+                    headers.append((name.encode("latin-1"), value.encode("latin-1")))
+
+                # Strong default CSP: no inline script; allow inline styles (minimal inline used); self-only resources
+                csp = (
+                    "default-src 'self'; "
+                    "script-src 'self'; "
+                    "style-src 'self' 'unsafe-inline'; "
+                    "img-src 'self' data:; "
+                    "font-src 'self'; "
+                    "connect-src 'self'; "
+                    "object-src 'none'; "
+                    "base-uri 'none'; "
+                    "frame-ancestors 'none'; "
+                    "manifest-src 'self'; "
+                    "worker-src 'self' blob:"
+                )
+                set_header("content-security-policy", csp)
+
+                # Other helpful headers
+                set_header("x-content-type-options", "nosniff")
+                set_header("referrer-policy", "no-referrer")
+                set_header("permissions-policy", "geolocation=(), microphone=(), camera=(), payment=()")
+
+                # HSTS: instruct browsers to only use HTTPS for this host
+                # Note: only effective over HTTPS; harmless on HTTP
+                set_header("strict-transport-security", "max-age=31536000; includeSubDomains")
+
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
+
+app.add_middleware(SecurityHeadersMiddleware)
 
 # ---- Schemas ----
 class ReserveReq(BaseModel):
